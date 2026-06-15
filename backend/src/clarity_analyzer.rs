@@ -1,43 +1,46 @@
-use crate::models::{SpeechIntelligibility, StiAnalysisParams};
+use crate::models::{AnalyzerRequest, AlarmEvent, SpeechIntelligibility, StiAnalysisParams, StiWeightsConfig};
 use std::f64::consts::PI;
+use tokio::sync::mpsc;
 
-const STI_OCTAVE_BANDS: [f64; 7] = [125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0];
-const RASTI_BANDS: [f64; 5] = [500.0, 1000.0, 2000.0, 4000.0, 8000.0];
-const STI_MODULATION_FREQS: [f64; 14] = [0.63, 0.8, 1.0, 1.25, 1.6, 2.0, 2.5, 3.15, 4.0, 5.0, 6.3, 8.0, 10.0, 12.5];
-
-const STI_BAND_WEIGHTS: [f64; 7] = [0.026, 0.061, 0.147, 0.203, 0.206, 0.202, 0.155];
-
-const ANCIENT_CHINESE_STI_WEIGHTS: [f64; 7] = [0.095, 0.120, 0.160, 0.195, 0.190, 0.145, 0.095];
-
-const ANCIENT_CHINESE_RASTI_WEIGHTS: [f64; 5] = [0.20, 0.22, 0.22, 0.20, 0.16];
-
-const RASTI_BAND_WEIGHTS: [f64; 5] = [0.15, 0.20, 0.20, 0.20, 0.25];
-
-const TONE_CRITICAL_MOD_FREQS: [f64; 4] = [2.0, 3.15, 5.0, 8.0];
-
-pub enum StiMode {
-    Standard,
-    AncientChinese,
+pub struct AnalyzerTask {
+    sti_config: StiWeightsConfig,
+    rx: mpsc::Receiver<AnalyzerRequest>,
+    alarm_tx: mpsc::Sender<AlarmEvent>,
 }
 
-pub struct StiCalculator;
-
-impl StiCalculator {
-    pub fn analyze(params: &StiAnalysisParams) -> SpeechIntelligibility {
-        let mode = StiMode::AncientChinese;
-        Self::analyze_with_mode(params, &mode)
+impl AnalyzerTask {
+    pub fn new(sti_config: StiWeightsConfig, rx: mpsc::Receiver<AnalyzerRequest>, alarm_tx: mpsc::Sender<AlarmEvent>) -> Self {
+        Self { sti_config, rx, alarm_tx }
     }
 
-    pub fn analyze_with_mode(params: &StiAnalysisParams, mode: &StiMode) -> SpeechIntelligibility {
+    pub async fn run(&mut self) {
+        while let Some(req) = self.rx.recv().await {
+            match req {
+                AnalyzerRequest::AnalyzeSti { params, reply } => {
+                    let result = self.analyze_with_config(&params);
+                    let _ = self.alarm_tx.send(AlarmEvent::CheckIntelligibility {
+                        site_id: result.site_id.clone(),
+                        sti: result.sti_value,
+                        d50: result.definition_d50,
+                        c50: result.clarity_c50,
+                    }).await;
+                    let _ = reply.send(result);
+                }
+            }
+        }
+    }
+
+    fn analyze_with_config(&self, params: &StiAnalysisParams) -> SpeechIntelligibility {
         let ir = &params.impulse_response;
         let fs = params.sample_rate;
+        let is_ancient = self.sti_config.default_mode == "ancient_chinese";
 
         let (d50, c50) = Self::compute_definition_clarity(ir, fs);
         let center_time = Self::compute_center_time(ir, fs);
         let crispness = Self::compute_crispness(ir, fs);
 
-        let (sti_value, band_snr) = Self::compute_sti(ir, fs, params.background_noise_level, params.speech_level, mode);
-        let rasti_value = Self::compute_rasti(ir, fs, params.background_noise_level, params.speech_level, mode);
+        let (sti_value, band_snr) = self.compute_sti(ir, fs, params.background_noise_level, params.speech_level, is_ancient);
+        let rasti_value = self.compute_rasti(ir, fs, params.background_noise_level, params.speech_level, is_ancient);
 
         SpeechIntelligibility {
             timestamp: chrono::Utc::now(),
@@ -55,41 +58,43 @@ impl StiCalculator {
             definition_d50: d50,
             clarity_c50: c50,
             center_time,
-            frequency_bands: STI_OCTAVE_BANDS.to_vec(),
+            frequency_bands: self.sti_config.octave_bands.clone(),
             band_snr,
             speech_content: None,
         }
     }
 
-    fn compute_sti(
-        ir: &[f64],
-        fs: u32,
-        noise_level_db: f64,
-        speech_level_db: f64,
-        mode: &StiMode,
-    ) -> (f64, Vec<f64>) {
-        let weights = match mode {
-            StiMode::Standard => &STI_BAND_WEIGHTS,
-            StiMode::AncientChinese => &ANCIENT_CHINESE_STI_WEIGHTS,
+    fn compute_sti(&self, ir: &[f64], fs: u32, noise_level_db: f64, speech_level_db: f64, is_ancient: bool) -> (f64, Vec<f64>) {
+        let weights = if is_ancient {
+            &self.sti_config.ancient_chinese_weights.sti
+        } else {
+            &self.sti_config.standard_weights.sti
         };
-        let mut band_snr = Vec::with_capacity(7);
-        let mut mtis = Vec::with_capacity(7);
+        let octave_bands = &self.sti_config.octave_bands;
+        let mod_freqs = &self.sti_config.modulation_frequencies;
+        let num_bands = octave_bands.len().min(weights.len());
 
-        for band_idx in 0..7 {
-            let fc = STI_OCTAVE_BANDS[band_idx];
+        let mut band_snr = Vec::with_capacity(num_bands);
+        let mut mtis = Vec::with_capacity(num_bands);
+
+        for band_idx in 0..num_bands {
+            let fc = octave_bands[band_idx];
             let filtered = Self::octave_band_filter(ir, fs, fc);
-            let mut mti_band = Vec::with_capacity(14);
+            let mut mti_band = Vec::with_capacity(mod_freqs.len());
 
-            for &fm in &STI_MODULATION_FREQS {
+            for &fm in mod_freqs {
                 let mtf = Self::compute_mtf(&filtered, fs, fm);
-                let tone_boost = match mode {
-                    StiMode::AncientChinese if band_idx < 2 => {
-                        if TONE_CRITICAL_MOD_FREQS.contains(&fm) { 1.3 } else { 1.0 }
+                let tone_boost = if is_ancient && self.sti_config.ancient_chinese_weights.tone_affected_bands.contains(&band_idx) {
+                    if self.sti_config.ancient_chinese_weights.tone_critical_mod_freqs.contains(&fm) {
+                        self.sti_config.ancient_chinese_weights.tone_boost_factor
+                    } else {
+                        1.0
                     }
-                    _ => 1.0,
+                } else {
+                    1.0
                 };
                 let mti = if mtf > 0.001 {
-                    let snr_eff = (speech_level_db - noise_level_db).clamp(-15.0, 15.0);
+                    let snr_eff = (speech_level_db - noise_level_db).clamp(self.sti_config.snr_clamp_range[0], self.sti_config.snr_clamp_range[1]);
                     let raw_mti = Self::snr_to_mti(mtf, snr_eff);
                     (raw_mti * tone_boost).min(1.0)
                 } else {
@@ -115,28 +120,35 @@ impl StiCalculator {
         (sti.clamp(0.0, 1.0), band_snr)
     }
 
-    fn compute_rasti(
-        ir: &[f64],
-        fs: u32,
-        noise_level_db: f64,
-        speech_level_db: f64,
-        mode: &StiMode,
-    ) -> f64 {
-        let rasti_weights = match mode {
-            StiMode::Standard => &RASTI_BAND_WEIGHTS,
-            StiMode::AncientChinese => &ANCIENT_CHINESE_RASTI_WEIGHTS,
+    fn compute_rasti(&self, ir: &[f64], fs: u32, noise_level_db: f64, speech_level_db: f64, is_ancient: bool) -> f64 {
+        let rasti_weights = if is_ancient {
+            &self.sti_config.ancient_chinese_weights.rasti
+        } else {
+            &self.sti_config.standard_weights.rasti
         };
-        let rasti_mod_freqs = [0.5, 1.0, 2.0, 4.0, 8.0];
+        let rasti_bands = if is_ancient {
+            &self.sti_config.ancient_chinese_weights.rasti_bands
+        } else {
+            &self.sti_config.standard_weights.rasti_bands
+        };
+        let rasti_mod_freqs = if is_ancient {
+            &self.sti_config.ancient_chinese_weights.rasti_mod_freqs
+        } else {
+            &self.sti_config.standard_weights.rasti_mod_freqs
+        };
+
+        let num_bands = rasti_bands.len().min(rasti_weights.len());
         let mut weighted_sum = 0.0;
 
-        for (band_idx, &fc) in RASTI_BANDS.iter().enumerate() {
+        for band_idx in 0..num_bands {
+            let fc = rasti_bands[band_idx];
             let filtered = Self::octave_band_filter(ir, fs, fc);
             let mut mtf_sum = 0.0;
-            for &fm in &rasti_mod_freqs {
+            for &fm in rasti_mod_freqs {
                 mtf_sum += Self::compute_mtf(&filtered, fs, fm);
             }
             let avg_mtf = mtf_sum / rasti_mod_freqs.len() as f64;
-            let snr_eff = (speech_level_db - noise_level_db).clamp(-15.0, 15.0);
+            let snr_eff = (speech_level_db - noise_level_db).clamp(self.sti_config.snr_clamp_range[0], self.sti_config.snr_clamp_range[1]);
             let mti = Self::snr_to_mti(avg_mtf, snr_eff);
             weighted_sum += rasti_weights[band_idx] * mti;
         }
@@ -172,10 +184,9 @@ impl StiCalculator {
     }
 
     fn octave_band_filter(signal: &[f64], fs: u32, center_freq: f64) -> Vec<f64> {
-        let q = 1.0 / (2.0_f64.sqrt());
+        let _q = 1.0 / (2.0_f64.sqrt());
         let fl = center_freq / (2.0_f64.sqrt());
         let fh = center_freq * (2.0_f64.sqrt());
-        let _ = q;
 
         let wl = 2.0 * PI * fl / fs as f64;
         let wh = 2.0 * PI * fh / fs as f64;

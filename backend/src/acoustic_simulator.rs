@@ -1,41 +1,11 @@
-use crate::models::{SoundPath, Vec3, SimulationParams, SoundFieldSnapshot};
+use crate::models::{SimulatorRequest, SoundPath, SoundFieldSnapshot, SimulationParams, Vec3, AcousticConfig, SiteConfig};
 use nalgebra::{Point3, Vector3, UnitVector3};
 use rand::{Rng, thread_rng};
 use rand_distr::{Normal, Distribution};
 use num_complex::Complex;
 use std::f64::consts::PI;
-
-const SPEED_OF_SOUND: f64 = 343.0;
-const AIR_ABSORPTION_COEFF: f64 = 0.005;
-const DIFFRACTION_THRESHOLD: f64 = 0.1;
-
-fn fresnel_number(path_diff: f64, frequency: f64) -> f64 {
-    let wavelength = SPEED_OF_SOUND / frequency.max(1.0);
-    2.0 * path_diff / wavelength
-}
-
-fn utd_diffraction_coeff(fresnel_n: f64) -> f64 {
-    if fresnel_n < -1.0 { return 0.5; }
-    if fresnel_n > 5.0 { return 0.0; }
-    let x = fresnel_n * (PI / 2.0).sqrt();
-    let c = 0.5 * (0.5 - x.cos() * (0.5 * PI * fresnel_n.abs()).sin().copysign(1.0));
-    let s = 0.5 * (0.5 + x.sin() * (0.5 * PI * fresnel_n.abs()).cos().copysign(1.0));
-    (c * c + s * s).sqrt() * 0.5
-}
-
-fn diffraction_scatter(frequency: f64, wall_height: f64) -> f64 {
-    let wavelength = SPEED_OF_SOUND / frequency.max(1.0);
-    let ratio = wavelength / wall_height.max(0.1);
-    if ratio > DIFFRACTION_THRESHOLD {
-        (ratio - DIFFRACTION_THRESHOLD).min(1.0) * 0.3
-    } else {
-        0.0
-    }
-}
-
-pub struct AcousticSimulator {
-    pub site_params: SiteAcousticParams,
-}
+use std::sync::Arc;
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub struct SiteAcousticParams {
@@ -48,60 +18,75 @@ pub struct SiteAcousticParams {
 }
 
 impl SiteAcousticParams {
-    pub fn huiyinbi() -> Self {
+    pub fn from_site_config(site_id: &str, config: &SiteConfig) -> Self {
         Self {
-            site_id: "huiyinbi".to_string(),
-            site_type: "circular_wall".to_string(),
-            radius: 30.75,
-            wall_height: 3.72,
-            wall_absorption: 0.05,
-            center: Point3::new(0.0, 0.0, 0.0),
-        }
-    }
-
-    pub fn sanyinshi() -> Self {
-        Self {
-            site_id: "sanyinshi".to_string(),
-            site_type: "stone_plaza".to_string(),
-            radius: 5.0,
-            wall_height: 0.2,
-            wall_absorption: 0.03,
-            center: Point3::new(0.0, 0.0, 5.0),
-        }
-    }
-
-    pub fn huanqiutan() -> Self {
-        Self {
-            site_id: "huanqiutan".to_string(),
-            site_type: "circular_altar".to_string(),
-            radius: 11.5,
-            wall_height: 5.0,
-            wall_absorption: 0.02,
-            center: Point3::new(0.0, 0.0, -30.0),
-        }
-    }
-
-    pub fn from_id(site_id: &str) -> Option<Self> {
-        match site_id {
-            "huiyinbi" => Some(Self::huiyinbi()),
-            "sanyinshi" => Some(Self::sanyinshi()),
-            "huanqiutan" => Some(Self::huanqiutan()),
-            _ => None,
+            site_id: site_id.to_string(),
+            site_type: config.site_type.clone(),
+            radius: config.radius,
+            wall_height: config.wall_height,
+            wall_absorption: config.wall_absorption,
+            center: Point3::new(config.center[0], config.center[1], config.center[2]),
         }
     }
 }
 
+pub struct AcousticSimulator {
+    pub site_params: SiteAcousticParams,
+    speed_of_sound: f64,
+    air_absorption_coeff: f64,
+    diffraction_threshold: f64,
+}
+
+struct RayHit {
+    point: Point3<f64>,
+}
+
+fn fresnel_number(path_diff: f64, frequency: f64, speed_of_sound: f64) -> f64 {
+    let wavelength = speed_of_sound / frequency.max(1.0);
+    2.0 * path_diff / wavelength
+}
+
+fn utd_diffraction_coeff(fresnel_n: f64) -> f64 {
+    if fresnel_n < -1.0 { return 0.5; }
+    if fresnel_n > 5.0 { return 0.0; }
+    let x = fresnel_n * (PI / 2.0).sqrt();
+    let c = 0.5 * (0.5 - x.cos() * (0.5 * PI * fresnel_n.abs()).sin().copysign(1.0));
+    let s = 0.5 * (0.5 + x.sin() * (0.5 * PI * fresnel_n.abs()).cos().copysign(1.0));
+    (c * c + s * s).sqrt() * 0.5
+}
+
+fn diffraction_scatter(frequency: f64, wall_height: f64, speed_of_sound: f64, diffraction_threshold: f64) -> f64 {
+    let wavelength = speed_of_sound / frequency.max(1.0);
+    let ratio = wavelength / wall_height.max(0.1);
+    if ratio > diffraction_threshold {
+        (ratio - diffraction_threshold).min(1.0) * 0.3
+    } else {
+        0.0
+    }
+}
+
+fn compute_diffraction_loss(frequency: f64, wall_height: f64, speed_of_sound: f64) -> f64 {
+    let fresnel_n = fresnel_number(wall_height * 0.5, frequency, speed_of_sound);
+    let diff_coeff = utd_diffraction_coeff(fresnel_n);
+    -20.0 * diff_coeff.max(0.001).log10()
+}
+
 impl AcousticSimulator {
-    pub fn new(site_params: SiteAcousticParams) -> Self {
-        Self { site_params }
+    pub fn new(site_params: SiteAcousticParams, speed_of_sound: f64, air_absorption_coeff: f64, diffraction_threshold: f64) -> Self {
+        Self {
+            site_params,
+            speed_of_sound,
+            air_absorption_coeff,
+            diffraction_threshold,
+        }
     }
 
     pub fn trace_ray_geometric(&self, params: &SimulationParams) -> Vec<SoundPath> {
         let mut rng = thread_rng();
         let mut paths = Vec::new();
         let src = params.source_position.to_point3();
-        let wavelength = SPEED_OF_SOUND / params.frequency.max(1.0);
-        let low_freq = wavelength / self.site_params.wall_height.max(0.1) > DIFFRACTION_THRESHOLD;
+        let wavelength = self.speed_of_sound / params.frequency.max(1.0);
+        let low_freq = wavelength / self.site_params.wall_height.max(0.1) > self.diffraction_threshold;
 
         for _ in 0..params.num_rays {
             let theta = rng.gen_range(0.0..2.0 * PI);
@@ -128,20 +113,12 @@ impl AcousticSimulator {
                     );
                     let ddir = UnitVector3::new_normalize(ddir);
                     let mut dpath = self.trace_single_ray(&src, &ddir, params.max_reflections, params.frequency);
-                    dpath.attenuation_db += self.compute_diffraction_loss(params.frequency);
+                    dpath.attenuation_db += compute_diffraction_loss(params.frequency, self.site_params.wall_height, self.speed_of_sound);
                     paths.push(dpath);
                 }
             }
         }
         paths
-    }
-
-    fn compute_diffraction_loss(&self, frequency: f64) -> f64 {
-        let wavelength = SPEED_OF_SOUND / frequency.max(1.0);
-        let h = self.site_params.wall_height;
-        let fresnel_n = fresnel_number(h * 0.5, frequency);
-        let diff_coeff = utd_diffraction_coeff(fresnel_n);
-        -20.0 * diff_coeff.max(0.001).log10()
     }
 
     fn trace_single_ray(
@@ -158,7 +135,7 @@ impl AcousticSimulator {
         let mut total_distance = 0.0;
         let mut attenuation = 0.0;
         let mut reflections = 0u8;
-        let scatter = diffraction_scatter(frequency, self.site_params.wall_height);
+        let scatter = diffraction_scatter(frequency, self.site_params.wall_height, self.speed_of_sound, self.diffraction_threshold);
 
         for _ in 0..=max_reflections {
             if let Some(hit) = self.intersect_circular_wall(&current_pos, &current_dir) {
@@ -167,10 +144,10 @@ impl AcousticSimulator {
                 total_distance += distance;
 
                 attenuation += 20.0 * (total_distance / 1.0).log10().max(0.0);
-                attenuation += AIR_ABSORPTION_COEFF * total_distance * (frequency / 1000.0);
+                attenuation += self.air_absorption_coeff * total_distance * (frequency / 1000.0);
                 attenuation += -10.0 * (1.0 - self.site_params.wall_absorption).log10();
 
-                let fresnel_n = fresnel_number(distance * 0.5, frequency);
+                let fresnel_n = fresnel_number(distance * 0.5, frequency, self.speed_of_sound);
                 let diff_coeff = utd_diffraction_coeff(fresnel_n);
                 attenuation += -20.0 * (1.0 - diff_coeff * 0.3).max(0.001).log10();
 
@@ -206,13 +183,11 @@ impl AcousticSimulator {
             reflection_count: reflections,
             path_points,
             travel_distance: total_distance,
-            travel_time: total_distance / SPEED_OF_SOUND,
+            travel_time: total_distance / self.speed_of_sound,
             attenuation_db: attenuation,
             frequency,
         }
     }
-
-    struct RayHit { point: Point3<f64> }
 
     fn intersect_circular_wall(
         &self,
@@ -267,7 +242,7 @@ impl AcousticSimulator {
         let r = self.site_params.radius + 2.0;
         let c = self.site_params.center;
         let src = params.source_position.to_point3();
-        let k = 2.0 * PI * params.frequency / SPEED_OF_SOUND;
+        let k = 2.0 * PI * params.frequency / self.speed_of_sound;
 
         let mut field = vec![vec![0.0f64; ny as usize]; nx as usize];
 
@@ -386,5 +361,69 @@ impl AcousticSimulator {
         if !found_t60 { t_t60 = t_t30 / 0.9; }
 
         (t_t60.max(0.5), t_t30.max(0.4), t_edt.max(0.3))
+    }
+}
+
+pub struct SimulatorTask {
+    config: Arc<AcousticConfig>,
+    rx: mpsc::Receiver<SimulatorRequest>,
+}
+
+impl SimulatorTask {
+    pub fn new(config: Arc<AcousticConfig>, rx: mpsc::Receiver<SimulatorRequest>) -> Self {
+        Self { config, rx }
+    }
+
+    pub async fn run(&mut self) {
+        while let Some(req) = self.rx.recv().await {
+            match req {
+                SimulatorRequest::TraceRays { params, reply } => {
+                    let result = self.handle_trace_rays(&params);
+                    let _ = reply.send(result);
+                }
+                SimulatorRequest::WaveField { params, reply } => {
+                    let result = self.handle_wave_field(&params);
+                    let _ = reply.send(result);
+                }
+            }
+        }
+    }
+
+    fn handle_trace_rays(&self, params: &SimulationParams) -> Vec<SoundPath> {
+        if let Some(sim) = self.create_simulator(&params.site_id) {
+            sim.trace_ray_geometric(params)
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn handle_wave_field(&self, params: &SimulationParams) -> SoundFieldSnapshot {
+        if let Some(sim) = self.create_simulator(&params.site_id) {
+            let grid_res = self.config.simulation_defaults.wave_field_grid_resolution;
+            sim.compute_wave_sound_field(params, grid_res)
+        } else {
+            SoundFieldSnapshot {
+                timestamp: chrono::Utc::now(),
+                snapshot_id: uuid::Uuid::new_v4(),
+                site_id: params.site_id.clone(),
+                grid_resolution: 0,
+                grid_points_x: 0,
+                grid_points_y: 0,
+                pressure_field: Vec::new(),
+                frequency: params.frequency,
+                source_position: params.source_position.clone(),
+            }
+        }
+    }
+
+    fn create_simulator(&self, site_id: &str) -> Option<AcousticSimulator> {
+        let site_config = self.config.sites.get(site_id)?;
+        let site_params = SiteAcousticParams::from_site_config(site_id, site_config);
+        Some(AcousticSimulator::new(
+            site_params,
+            self.config.simulation_defaults.speed_of_sound,
+            self.config.simulation_defaults.air_absorption_coefficient,
+            self.config.simulation_defaults.diffraction_threshold,
+        ))
     }
 }

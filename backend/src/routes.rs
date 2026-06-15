@@ -1,7 +1,5 @@
-use crate::acoustics::{AcousticSimulator, SiteAcousticParams};
-use crate::alerts::AlertManager;
+use crate::dtu_receiver::DtuReceiver;
 use crate::models::*;
-use crate::sti::StiCalculator;
 use crate::storage::ClickHouseStore;
 use axum::{
     extract::{Path, State, Query},
@@ -10,11 +8,13 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
-use tracing::info;
 
 pub struct AppState {
     pub store: Arc<ClickHouseStore>,
-    pub alerts: Arc<AlertManager>,
+    pub dtu_receiver: Arc<DtuReceiver>,
+    pub sim_tx: tokio::sync::mpsc::Sender<SimulatorRequest>,
+    pub analyzer_tx: tokio::sync::mpsc::Sender<AnalyzerRequest>,
+    pub config: Arc<AcousticConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,22 +85,10 @@ async fn get_site_measurements(
 
 async fn post_measurement(
     State(state): State<Arc<AppState>>,
-    Json(mut m): Json<AcousticMeasurement>,
+    Json(m): Json<AcousticMeasurement>,
 ) -> Json<ApiResponse<String>> {
-    m.timestamp = chrono::Utc::now();
-    m.measurement_id = uuid::Uuid::new_v4();
-
-    if let Some(alert) = state.alerts.check_reverb(&m.site_id, m.reverb_time_t60) {
-        let _ = state.store.insert_alert(&alert).await;
-        let _ = state.alerts.publish_alert(&alert).await;
-    }
-    if let Some(alert) = state.alerts.check_spl(&m.site_id, m.sound_pressure_level) {
-        let _ = state.store.insert_alert(&alert).await;
-        let _ = state.alerts.publish_alert(&alert).await;
-    }
-
-    match state.store.insert_measurement(&m).await {
-        Ok(_) => Json(ApiResponse::ok(format!("测量数据已保存: {}", m.measurement_id))),
+    match state.dtu_receiver.receive_measurement(m).await {
+        Ok(validated) => Json(ApiResponse::ok(format!("测量数据已保存: {}", validated.measurement_id))),
         Err(e) => Json(ApiResponse::error(&e.to_string())),
     }
 }
@@ -143,20 +131,8 @@ async fn get_intelligibility(
 
 async fn post_intelligibility(
     State(state): State<Arc<AppState>>,
-    Json(mut s): Json<SpeechIntelligibility>,
+    Json(s): Json<SpeechIntelligibility>,
 ) -> Json<ApiResponse<String>> {
-    s.timestamp = chrono::Utc::now();
-    s.analysis_id = uuid::Uuid::new_v4();
-
-    if let Some(alert) = state.alerts.check_sti(&s.site_id, s.sti_value) {
-        let _ = state.store.insert_alert(&alert).await;
-        let _ = state.alerts.publish_alert(&alert).await;
-    }
-    if let Some(alert) = state.alerts.check_definition(&s.site_id, s.definition_d50, s.clarity_c50) {
-        let _ = state.store.insert_alert(&alert).await;
-        let _ = state.alerts.publish_alert(&alert).await;
-    }
-
     match state.store.insert_intelligibility(&s).await {
         Ok(_) => Json(ApiResponse::ok(format!("STI分析结果已保存: {}", s.analysis_id))),
         Err(e) => Json(ApiResponse::error(&e.to_string())),
@@ -180,9 +156,8 @@ async fn post_alert(
 ) -> Json<ApiResponse<String>> {
     a.timestamp = chrono::Utc::now();
     a.alert_id = uuid::Uuid::new_v4();
-    let _ = state.alerts.publish_alert(&a).await;
     match state.store.insert_alert(&a).await {
-        Ok(_) => Json(ApiResponse::ok(format!("告警已保存并推送: {}", a.alert_id))),
+        Ok(_) => Json(ApiResponse::ok(format!("告警已保存: {}", a.alert_id))),
         Err(e) => Json(ApiResponse::error(&e.to_string())),
     }
 }
@@ -201,60 +176,70 @@ async fn run_acoustic_simulation(
     State(state): State<Arc<AppState>>,
     Json(params): Json<SimulationParams>,
 ) -> Json<ApiResponse<Vec<SoundPath>>> {
-    info!("Running acoustic simulation for site: {}", params.site_id);
-
-    let site_params = match SiteAcousticParams::from_id(&params.site_id) {
-        Some(p) => p,
-        None => return Json(ApiResponse::error("无效的场所ID")),
-    };
-
-    let simulator = AcousticSimulator::new(site_params);
-    let paths = simulator.trace_ray_geometric(&params);
-
-    for path in &paths {
-        let _ = state.store.insert_sound_path(path).await;
+    if !state.config.valid_site_ids.contains(&params.site_id) {
+        return Json(ApiResponse::error("无效的场所ID"));
     }
 
-    Json(ApiResponse::ok(paths))
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let req = SimulatorRequest::TraceRays { params, reply: reply_tx };
+
+    if state.sim_tx.send(req).await.is_err() {
+        return Json(ApiResponse::error("仿真模块不可用"));
+    }
+
+    match reply_rx.await {
+        Ok(paths) => {
+            for path in &paths {
+                let _ = state.store.insert_sound_path(path).await;
+            }
+            Json(ApiResponse::ok(paths))
+        }
+        Err(_) => Json(ApiResponse::error("仿真请求超时")),
+    }
 }
 
 async fn run_sti_analysis(
     State(state): State<Arc<AppState>>,
     Json(params): Json<StiAnalysisParams>,
 ) -> Json<ApiResponse<SpeechIntelligibility>> {
-    info!("Running STI analysis for site: {}", params.site_id);
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let req = AnalyzerRequest::AnalyzeSti { params, reply: reply_tx };
 
-    let result = StiCalculator::analyze(&params);
-
-    if let Some(alert) = state.alerts.check_sti(&result.site_id, result.sti_value) {
-        let _ = state.store.insert_alert(&alert).await;
-        let _ = state.alerts.publish_alert(&alert).await;
-    }
-    if let Some(alert) = state.alerts.check_definition(&result.site_id, result.definition_d50, result.clarity_c50) {
-        let _ = state.store.insert_alert(&alert).await;
-        let _ = state.alerts.publish_alert(&alert).await;
+    if state.analyzer_tx.send(req).await.is_err() {
+        return Json(ApiResponse::error("STI分析模块不可用"));
     }
 
-    let _ = state.store.insert_intelligibility(&result).await;
-    Json(ApiResponse::ok(result))
+    match reply_rx.await {
+        Ok(result) => {
+            let _ = state.store.insert_intelligibility(&result).await;
+            Json(ApiResponse::ok(result))
+        }
+        Err(_) => Json(ApiResponse::error("STI分析请求超时")),
+    }
 }
 
 async fn run_wave_field_simulation(
     State(state): State<Arc<AppState>>,
     Json(params): Json<SimulationParams>,
 ) -> Json<ApiResponse<SoundFieldSnapshot>> {
-    info!("Running wave field simulation for site: {}", params.site_id);
+    if !state.config.valid_site_ids.contains(&params.site_id) {
+        return Json(ApiResponse::error("无效的场所ID"));
+    }
 
-    let site_params = match SiteAcousticParams::from_id(&params.site_id) {
-        Some(p) => p,
-        None => return Json(ApiResponse::error("无效的场所ID")),
-    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let req = SimulatorRequest::WaveField { params, reply: reply_tx };
 
-    let simulator = AcousticSimulator::new(site_params);
-    let field = simulator.compute_wave_sound_field(&params, 64);
-    let _ = state.store.insert_sound_field(&field).await;
+    if state.sim_tx.send(req).await.is_err() {
+        return Json(ApiResponse::error("仿真模块不可用"));
+    }
 
-    Json(ApiResponse::ok(field))
+    match reply_rx.await {
+        Ok(field) => {
+            let _ = state.store.insert_sound_field(&field).await;
+            Json(ApiResponse::ok(field))
+        }
+        Err(_) => Json(ApiResponse::error("波动声场仿真请求超时")),
+    }
 }
 
 async fn get_stats(State(state): State<Arc<AppState>>) -> Json<ApiResponse<serde_json::Value>> {
@@ -265,8 +250,6 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> Json<ApiResponse<serde
         "intelligibility_count": i,
         "alerts_count": a,
         "sound_fields_count": f,
-        "clickhouse_url": "http://localhost:8123",
-        "mqtt_topic": "tiantan/acoustics",
     });
     Json(ApiResponse::ok(stats))
 }

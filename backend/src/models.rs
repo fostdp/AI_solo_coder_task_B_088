@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use nalgebra::Point3;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vec3 {
@@ -104,30 +105,6 @@ pub struct SoundFieldSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SensorMetadata {
-    pub sensor_id: String,
-    pub site_id: String,
-    pub site_name: String,
-    pub position: Vec3,
-    pub sensor_type: String,
-    pub installed_date: String,
-    pub calibration_date: String,
-    pub status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SiteInfo {
-    pub site_id: String,
-    pub site_name: String,
-    pub site_type: String,
-    pub description: String,
-    pub center_position: Vec3,
-    pub dimensions: Vec3,
-    pub wall_material: String,
-    pub wall_absorption: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimulationParams {
     pub site_id: String,
     pub source_position: Vec3,
@@ -161,4 +138,137 @@ impl<T> ApiResponse<T> {
     pub fn error(msg: &str) -> Self {
         Self { success: false, data: None, message: msg.to_string() }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcousticConfig {
+    pub sites: HashMap<String, SiteConfig>,
+    pub simulation_defaults: SimDefaults,
+    pub alert_thresholds: AlertThresholds,
+    pub valid_site_ids: Vec<String>,
+    pub valid_sensor_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SiteConfig {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub site_type: String,
+    pub radius: f64,
+    pub wall_height: f64,
+    pub wall_absorption: f64,
+    pub center: [f64; 3],
+    pub base_reverb_t60: f64,
+    pub base_spl: f64,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimDefaults {
+    pub speed_of_sound: f64,
+    pub air_absorption_coefficient: f64,
+    pub diffraction_threshold: f64,
+    pub wave_field_grid_resolution: u16,
+    pub wave_field_image_sources: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertThresholds {
+    pub sti_min: f64,
+    pub rasti_min: f64,
+    pub reverb_t60_min: f64,
+    pub reverb_t60_max: f64,
+    pub spl_min_db: f64,
+    pub spl_max_db: f64,
+    pub definition_d50_min: f64,
+    pub clarity_c50_min: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StiWeightsConfig {
+    pub octave_bands: Vec<f64>,
+    pub modulation_frequencies: Vec<f64>,
+    pub standard_weights: StiWeightSet,
+    pub ancient_chinese_weights: AncientChineseWeightSet,
+    pub snr_clamp_range: [f64; 2],
+    pub default_mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StiWeightSet {
+    pub sti: Vec<f64>,
+    pub rasti: Vec<f64>,
+    pub rasti_bands: Vec<f64>,
+    pub rasti_mod_freqs: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AncientChineseWeightSet {
+    pub sti: Vec<f64>,
+    pub rasti: Vec<f64>,
+    pub rasti_bands: Vec<f64>,
+    pub rasti_mod_freqs: Vec<f64>,
+    pub tone_critical_mod_freqs: Vec<f64>,
+    pub tone_boost_factor: f64,
+    pub tone_affected_bands: Vec<usize>,
+}
+
+pub enum DtuEvent {
+    Measurement(AcousticMeasurement),
+}
+
+pub enum SimulatorRequest {
+    TraceRays {
+        params: SimulationParams,
+        reply: tokio::sync::oneshot::Sender<Vec<SoundPath>>,
+    },
+    WaveField {
+        params: SimulationParams,
+        reply: tokio::sync::oneshot::Sender<SoundFieldSnapshot>,
+    },
+}
+
+pub enum AnalyzerRequest {
+    AnalyzeSti {
+        params: StiAnalysisParams,
+        reply: tokio::sync::oneshot::Sender<SpeechIntelligibility>,
+    },
+}
+
+pub enum AlarmEvent {
+    CheckMeasurement {
+        site_id: String,
+        reverb_t60: f64,
+        spl: f64,
+    },
+    CheckIntelligibility {
+        site_id: String,
+        sti: f64,
+        d50: f64,
+        c50: f64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SensorMetadata {
+    pub sensor_id: String,
+    pub site_id: String,
+    pub site_name: String,
+    pub position: Vec3,
+    pub sensor_type: String,
+    pub installed_date: String,
+    pub calibration_date: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SiteInfo {
+    pub site_id: String,
+    pub site_name: String,
+    pub site_type: String,
+    pub description: String,
+    pub center_position: Vec3,
+    pub dimensions: Vec3,
+    pub wall_material: String,
+    pub wall_absorption: f64,
 }

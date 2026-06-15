@@ -1,123 +1,85 @@
-use crate::models::AcousticAlert;
+use crate::models::{AlarmEvent, AcousticAlert, AlertThresholds};
+use crate::storage::ClickHouseStore;
 use rumqttc::{AsyncClient, MqttOptions, QoS};
 use serde_json::json;
-use std::time::Duration;
-use tokio::sync::Mutex;
 use std::sync::Arc;
-use tracing::{info, warn, error};
+use std::time::Duration;
+use tokio::sync::{mpsc, Mutex};
+use tracing::{error, info, warn};
 
-pub struct AlertManager {
-    client: AsyncClient,
+pub struct AlarmTask {
+    mqtt_client: AsyncClient,
     base_topic: String,
     thresholds: AlertThresholds,
+    rx: mpsc::Receiver<AlarmEvent>,
+    store: Arc<ClickHouseStore>,
     alert_history: Arc<Mutex<Vec<AcousticAlert>>>,
 }
 
-#[derive(Debug, Clone)]
-pub struct AlertThresholds {
-    pub sti_min: f64,
-    pub rasti_min: f64,
-    pub reverb_t60_min: f64,
-    pub reverb_t60_max: f64,
-    pub spl_min_db: f64,
-    pub spl_max_db: f64,
-    pub definition_d50_min: f64,
-    pub clarity_c50_min: f64,
-}
-
-impl Default for AlertThresholds {
-    fn default() -> Self {
-        Self {
-            sti_min: 0.50,
-            rasti_min: 0.55,
-            reverb_t60_min: 0.5,
-            reverb_t60_max: 4.0,
-            spl_min_db: 35.0,
-            spl_max_db: 110.0,
-            definition_d50_min: 30.0,
-            clarity_c50_min: -5.0,
-        }
-    }
-}
-
-impl AlertManager {
-    pub async fn new(
+impl AlarmTask {
+    pub fn new(
         broker_host: &str,
         broker_port: u16,
         client_id: &str,
         base_topic: &str,
-    ) -> anyhow::Result<Self> {
+        thresholds: AlertThresholds,
+        rx: mpsc::Receiver<AlarmEvent>,
+        store: Arc<ClickHouseStore>,
+    ) -> Self {
         let mut mqttoptions = MqttOptions::new(client_id, broker_host, broker_port);
         mqttoptions.set_keep_alive(Duration::from_secs(30));
-        mqttoptions.set_clean_session(true);
+        mqttoptions.set_clean_start(true);
 
-        let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
+        let (mqtt_client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
 
-        let client_clone = client.clone();
+        let _client_clone = mqtt_client.clone();
         tokio::spawn(async move {
             loop {
                 match eventloop.poll().await {
-                    Ok(_event) => {}
+                    Ok(_) => {}
                     Err(e) => {
                         error!("MQTT eventloop error: {:?}", e);
                         tokio::time::sleep(Duration::from_secs(5)).await;
-                        let _ = client_clone.try_connect();
                     }
                 }
             }
         });
 
-        Ok(Self {
-            client,
+        Self {
+            mqtt_client,
             base_topic: base_topic.to_string(),
-            thresholds: AlertThresholds::default(),
+            thresholds,
+            rx,
+            store,
             alert_history: Arc::new(Mutex::new(Vec::new())),
-        })
-    }
-
-    pub fn thresholds(&self) -> &AlertThresholds {
-        &self.thresholds
-    }
-
-    pub fn set_thresholds(&mut self, thresholds: AlertThresholds) {
-        self.thresholds = thresholds;
-    }
-
-    pub async fn publish_alert(&self, alert: &AcousticAlert) -> anyhow::Result<()> {
-        let topic = format!("{}/{}/{}", self.base_topic, alert.site_id, alert.alert_type);
-        let payload = json!({
-            "alert_id": alert.alert_id.to_string(),
-            "timestamp": alert.timestamp.to_rfc3339(),
-            "site_id": alert.site_id,
-            "alert_type": alert.alert_type,
-            "severity": alert.severity,
-            "metric_name": alert.metric_name,
-            "current_value": alert.current_value,
-            "threshold_value": alert.threshold_value,
-            "description": alert.description,
-            "acknowledged": alert.acknowledged,
-        });
-
-        let payload_str = serde_json::to_string(&payload)?;
-        self.client.publish(&topic, QoS::AtLeastOnce, false, payload_str).await?;
-
-        info!("Published alert to MQTT topic [{}]: {}", topic, alert.description);
-
-        let mut history = self.alert_history.lock().await;
-        history.push(alert.clone());
-        if history.len() > 1000 {
-            history.drain(0..history.len() - 1000);
         }
-
-        Ok(())
     }
 
-    pub async fn get_recent_alerts(&self, limit: usize) -> Vec<AcousticAlert> {
-        let history = self.alert_history.lock().await;
-        history.iter().rev().take(limit).cloned().collect()
+    pub async fn run(&mut self) {
+        while let Some(event) = self.rx.recv().await {
+            match event {
+                AlarmEvent::CheckMeasurement { site_id, reverb_t60, spl } => {
+                    if let Some(alert) = self.check_reverb(&site_id, reverb_t60) {
+                        let _ = self.publish_alert(&alert).await;
+                    }
+                    if let Some(alert) = self.check_spl(&site_id, spl) {
+                        let _ = self.publish_alert(&alert).await;
+                    }
+                }
+                AlarmEvent::CheckIntelligibility { site_id, sti, d50, c50 } => {
+                    if let Some(alert) = self.check_sti(&site_id, sti) {
+                        let _ = self.publish_alert(&alert).await;
+                    }
+                    if let Some(alert) = self.check_definition(&site_id, d50, c50) {
+                        let _ = self.publish_alert(&alert).await;
+                    }
+                }
+            }
+        }
+        warn!("AlarmTask channel closed, exiting run loop");
     }
 
-    pub fn check_sti(&self, site_id: &str, sti_value: f64) -> Option<AcousticAlert> {
+    fn check_sti(&self, site_id: &str, sti_value: f64) -> Option<AcousticAlert> {
         if sti_value < self.thresholds.sti_min {
             let severity = if sti_value < 0.30 { "critical" } else if sti_value < 0.45 { "warning" } else { "info" };
             Some(self.create_alert(
@@ -135,7 +97,7 @@ impl AlertManager {
         } else { None }
     }
 
-    pub fn check_reverb(&self, site_id: &str, t60: f64) -> Option<AcousticAlert> {
+    fn check_reverb(&self, site_id: &str, t60: f64) -> Option<AcousticAlert> {
         if t60 > self.thresholds.reverb_t60_max {
             Some(self.create_alert(
                 site_id,
@@ -159,7 +121,7 @@ impl AlertManager {
         } else { None }
     }
 
-    pub fn check_spl(&self, site_id: &str, spl: f64) -> Option<AcousticAlert> {
+    fn check_spl(&self, site_id: &str, spl: f64) -> Option<AcousticAlert> {
         if spl > self.thresholds.spl_max_db {
             Some(self.create_alert(
                 site_id,
@@ -183,7 +145,7 @@ impl AlertManager {
         } else { None }
     }
 
-    pub fn check_definition(&self, site_id: &str, d50: f64, c50: f64) -> Option<AcousticAlert> {
+    fn check_definition(&self, site_id: &str, d50: f64, c50: f64) -> Option<AcousticAlert> {
         if d50 < self.thresholds.definition_d50_min {
             Some(self.create_alert(
                 site_id,
@@ -231,5 +193,39 @@ impl AlertManager {
             mqtt_topic,
             acknowledged: 0,
         }
+    }
+
+    pub async fn publish_alert(&self, alert: &AcousticAlert) -> anyhow::Result<()> {
+        let topic = format!("{}/{}/{}", self.base_topic, alert.site_id, alert.alert_type);
+        let payload = json!({
+            "alert_id": alert.alert_id.to_string(),
+            "timestamp": alert.timestamp.to_rfc3339(),
+            "site_id": alert.site_id,
+            "alert_type": alert.alert_type,
+            "severity": alert.severity,
+            "metric_name": alert.metric_name,
+            "current_value": alert.current_value,
+            "threshold_value": alert.threshold_value,
+            "description": alert.description,
+            "acknowledged": alert.acknowledged,
+        });
+
+        let payload_str = serde_json::to_string(&payload)?;
+        self.mqtt_client.publish(&topic, QoS::AtLeastOnce, false, payload_str).await?;
+
+        info!("Published alert to MQTT topic [{}]: {}", topic, alert.description);
+
+        let mut history = self.alert_history.lock().await;
+        history.push(alert.clone());
+        if history.len() > 1000 {
+            history.drain(0..history.len() - 1000);
+        }
+
+        Ok(())
+    }
+
+    pub async fn get_recent_alerts(&self, limit: usize) -> Vec<AcousticAlert> {
+        let history = self.alert_history.lock().await;
+        history.iter().rev().take(limit).cloned().collect()
     }
 }

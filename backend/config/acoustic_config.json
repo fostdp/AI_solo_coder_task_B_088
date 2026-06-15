@@ -1,0 +1,60 @@
+{
+  "sites": {
+    "huiyinbi": {
+      "name": "回音壁",
+      "type": "circular_wall",
+      "radius": 30.75,
+      "wall_height": 3.72,
+      "wall_absorption": 0.05,
+      "center": [0.0, 0.0, 0.0],
+      "base_reverb_t60": 2.2,
+      "base_spl": 78.0,
+      "description": "天坛皇穹宇圆形围墙，直径61.5米，高3.72米"
+    },
+    "sanyinshi": {
+      "name": "三音石",
+      "type": "stone_plaza",
+      "radius": 5.0,
+      "wall_height": 0.2,
+      "wall_absorption": 0.03,
+      "center": [0.0, 0.0, 5.0],
+      "base_reverb_t60": 1.2,
+      "base_spl": 72.0,
+      "description": "皇穹宇殿前甬道上的三块石板"
+    },
+    "huanqiutan": {
+      "name": "圜丘坛",
+      "type": "circular_altar",
+      "radius": 11.5,
+      "wall_height": 5.0,
+      "wall_absorption": 0.02,
+      "center": [0.0, 0.0, -30.0],
+      "base_reverb_t60": 1.8,
+      "base_spl": 75.0,
+      "description": "三层圆形石坛，上层直径23米，高5米"
+    }
+  },
+  "simulation_defaults": {
+    "speed_of_sound": 343.0,
+    "air_absorption_coefficient": 0.005,
+    "diffraction_threshold": 0.1,
+    "wave_field_grid_resolution": 64,
+    "wave_field_image_sources": 20
+  },
+  "alert_thresholds": {
+    "sti_min": 0.50,
+    "rasti_min": 0.55,
+    "reverb_t60_min": 0.5,
+    "reverb_t60_max": 4.0,
+    "spl_min_db": 35.0,
+    "spl_max_db": 110.0,
+    "definition_d50_min": 30.0,
+    "clarity_c50_min": -5.0
+  },
+  "valid_site_ids": ["huiyinbi", "sanyinshi", "huanqiutan"],
+  "valid_sensor_ids": [
+    "HYB-S01", "HYB-S02", "HYB-S03", "HYB-S04", "HYB-S05",
+    "SYS-S01", "SYS-S02", "SYS-S03",
+    "HQT-S01", "HQT-S02", "HQT-S03"
+  ]
+}
