@@ -1,0 +1,981 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>天坛回音壁声学仿真与语音清晰度分析系统</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+            background: linear-gradient(135deg, #0a0a1a 0%, #1a1a3a 50%, #0d1b2a 100%);
+            color: #e8d4a8;
+            overflow: hidden;
+            height: 100vh;
+        }
+        .app-container { display: flex; height: 100vh; }
+        .main-view { flex: 1; position: relative; }
+        #three-canvas { width: 100%; height: 100%; display: block; }
+        #particle-canvas {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; z-index: 10;
+        }
+        .sidebar {
+            width: 380px; background: rgba(15, 20, 40, 0.92);
+            border-left: 2px solid #8b6914; padding: 20px;
+            overflow-y: auto; backdrop-filter: blur(10px);
+        }
+        .sidebar::-webkit-scrollbar { width: 6px; }
+        .sidebar::-webkit-scrollbar-track { background: rgba(0,0,0,0.2); }
+        .sidebar::-webkit-scrollbar-thumb { background: #8b6914; border-radius: 3px; }
+
+        .header {
+            text-align: center; padding-bottom: 16px; margin-bottom: 16px;
+            border-bottom: 2px solid #8b6914;
+        }
+        .header h1 {
+            font-size: 20px; color: #d4af37; margin-bottom: 6px;
+            text-shadow: 0 0 10px rgba(212, 175, 55, 0.5);
+            letter-spacing: 2px;
+        }
+        .header p { font-size: 12px; color: #a08050; }
+
+        .section {
+            background: rgba(30, 40, 60, 0.6); border: 1px solid rgba(139, 105, 20, 0.4);
+            border-radius: 8px; padding: 14px; margin-bottom: 14px;
+        }
+        .section-title {
+            font-size: 14px; color: #d4af37; margin-bottom: 10px;
+            padding-bottom: 6px; border-bottom: 1px solid rgba(212, 175, 55, 0.3);
+            display: flex; align-items: center; gap: 6px;
+        }
+        .section-title::before {
+            content: "◆"; color: #8b6914;
+        }
+
+        .site-selector { display: flex; gap: 6px; flex-wrap: wrap; }
+        .site-btn {
+            flex: 1; min-width: 80px; padding: 8px 6px;
+            background: rgba(40, 50, 80, 0.8); border: 1px solid #8b6914;
+            border-radius: 6px; color: #e8d4a8; cursor: pointer;
+            font-size: 12px; transition: all 0.3s;
+        }
+        .site-btn:hover { background: #8b6914; color: #fff; }
+        .site-btn.active { background: linear-gradient(135deg, #d4af37, #8b6914); color: #fff; border-color: #d4af37; }
+
+        .control-row { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+        .control-row label { font-size: 12px; color: #a08050; flex: 0 0 80px; }
+        .control-row input[type="range"] {
+            flex: 1; height: 4px; background: rgba(139, 105, 20, 0.3);
+            border-radius: 2px; appearance: none; outline: none;
+        }
+        .control-row input[type="range"]::-webkit-slider-thumb {
+            appearance: none; width: 14px; height: 14px; background: #d4af37;
+            border-radius: 50%; cursor: pointer;
+        }
+        .control-row .value { font-size: 12px; color: #d4af37; width: 40px; text-align: right; }
+
+        .action-btn {
+            width: 100%; padding: 10px; background: linear-gradient(135deg, #d4af37, #8b6914);
+            border: none; border-radius: 6px; color: #fff; font-size: 13px;
+            cursor: pointer; margin-bottom: 8px; transition: all 0.3s;
+            font-weight: bold; letter-spacing: 1px;
+        }
+        .action-btn:hover { box-shadow: 0 0 15px rgba(212, 175, 55, 0.6); transform: translateY(-1px); }
+        .action-btn.secondary { background: linear-gradient(135deg, #2a3a5a, #1a2a4a); border: 1px solid #8b6914; }
+
+        .metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .metric-card {
+            background: rgba(20, 30, 50, 0.8); padding: 10px; border-radius: 6px;
+            border-left: 3px solid #8b6914;
+        }
+        .metric-label { font-size: 10px; color: #a08050; margin-bottom: 4px; }
+        .metric-value { font-size: 18px; color: #d4af37; font-weight: bold; font-family: monospace; }
+        .metric-unit { font-size: 11px; color: #a08050; margin-left: 3px; }
+
+        .sti-bar {
+            height: 16px; background: rgba(40, 50, 80, 0.8); border-radius: 8px;
+            overflow: hidden; margin-top: 6px; position: relative;
+        }
+        .sti-bar-fill {
+            height: 100%; background: linear-gradient(90deg, #ff4444, #ffaa00, #44ff44);
+            border-radius: 8px; transition: width 0.8s ease;
+        }
+        .sti-labels { display: flex; justify-content: space-between; font-size: 10px; color: #a08050; margin-top: 3px; }
+
+        .alert-list { max-height: 150px; overflow-y: auto; }
+        .alert-item {
+            padding: 8px 10px; margin-bottom: 6px; border-radius: 5px;
+            font-size: 11px; background: rgba(40, 20, 20, 0.6);
+            border-left: 3px solid #ff4444;
+        }
+        .alert-item.warning { background: rgba(60, 50, 20, 0.6); border-left-color: #ffaa00; }
+        .alert-item.info { background: rgba(20, 30, 50, 0.6); border-left-color: #4488ff; }
+        .alert-severity { font-weight: bold; }
+        .alert-severity.critical { color: #ff6666; }
+        .alert-severity.warning { color: #ffcc66; }
+        .alert-severity.info { color: #88bbff; }
+        .alert-desc { margin-top: 3px; color: #c0a878; line-height: 1.4; }
+        .alert-time { font-size: 10px; color: #808070; margin-top: 3px; }
+
+        #sound-field-canvas {
+            width: 100%; height: 200px; border-radius: 6px;
+            background: rgba(0, 0, 0, 0.5); display: block;
+        }
+
+        .legend {
+            display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 11px;
+        }
+        .legend-gradient {
+            flex: 1; height: 10px; border-radius: 5px;
+            background: linear-gradient(90deg, #000080, #0080ff, #00ffff, #80ff80, #ffff00, #ff8000, #ff0000);
+        }
+        .legend-labels { display: flex; justify-content: space-between; font-size: 10px; color: #a08050; margin-top: 2px; }
+
+        .hud-overlay {
+            position: absolute; top: 20px; left: 20px; z-index: 20;
+            background: rgba(15, 20, 40, 0.85); border: 1px solid #8b6914;
+            border-radius: 8px; padding: 12px 16px; backdrop-filter: blur(10px);
+        }
+        .hud-title { font-size: 16px; color: #d4af37; margin-bottom: 6px; letter-spacing: 1px; }
+        .hud-stats { display: flex; gap: 18px; font-size: 12px; }
+        .hud-stat-label { color: #a08050; }
+        .hud-stat-value { color: #d4af37; font-family: monospace; margin-left: 4px; }
+
+        .view-controls {
+            position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+            z-index: 20; display: flex; gap: 10px;
+            background: rgba(15, 20, 40, 0.85); border: 1px solid #8b6914;
+            border-radius: 25px; padding: 8px 12px; backdrop-filter: blur(10px);
+        }
+        .view-btn {
+            width: 36px; height: 36px; border-radius: 50%; border: 1px solid #8b6914;
+            background: rgba(40, 50, 80, 0.8); color: #d4af37; cursor: pointer;
+            font-size: 14px; transition: all 0.3s;
+        }
+        .view-btn:hover { background: #8b6914; color: #fff; }
+
+        .connection-status {
+            position: absolute; top: 20px; right: 20px; z-index: 20;
+            background: rgba(15, 20, 40, 0.85); border: 1px solid #8b6914;
+            border-radius: 20px; padding: 8px 14px; display: flex; align-items: center; gap: 8px;
+            font-size: 12px; backdrop-filter: blur(10px);
+        }
+        .status-dot {
+            width: 10px; height: 10px; border-radius: 50%; background: #44ff44;
+            box-shadow: 0 0 10px #44ff44; animation: pulse 2s infinite;
+        }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .status-dot.disconnected { background: #ff4444; box-shadow: 0 0 10px #ff4444; }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <div class="main-view">
+            <canvas id="three-canvas"></canvas>
+            <canvas id="particle-canvas"></canvas>
+
+            <div class="hud-overlay">
+                <div class="hud-title">天坛声学实时监控</div>
+                <div class="hud-stats">
+                    <span><span class="hud-stat-label">声线:</span><span class="hud-stat-value" id="ray-count">0</span></span>
+                    <span><span class="hud-stat-label">粒子:</span><span class="hud-stat-value" id="particle-count">0</span></span>
+                    <span><span class="hud-stat-label">FPS:</span><span class="hud-stat-value" id="fps">0</span></span>
+                </div>
+            </div>
+
+            <div class="connection-status">
+                <span class="status-dot" id="status-dot"></span>
+                <span id="status-text">后端已连接</span>
+            </div>
+
+            <div class="view-controls">
+                <button class="view-btn" title="俯视图" onclick="setView('top')">⤓</button>
+                <button class="view-btn" title="正视图" onclick="setView('front')">◉</button>
+                <button class="view-btn" title="侧视图" onclick="setView('side')">◎</button>
+                <button class="view-btn" title="透视图" onclick="setView('perspective')">◈</button>
+                <button class="view-btn" title="重置" onclick="setView('reset')">↺</button>
+            </div>
+        </div>
+
+        <div class="sidebar">
+            <div class="header">
+                <h1>天坛声学仿真系统</h1>
+                <p>回音壁 · 三音石 · 圜丘坛</p>
+            </div>
+
+            <div class="section">
+                <div class="section-title">监测场所</div>
+                <div class="site-selector">
+                    <button class="site-btn active" data-site="huiyinbi" onclick="selectSite('huiyinbi')">回音壁</button>
+                    <button class="site-btn" data-site="sanyinshi" onclick="selectSite('sanyinshi')">三音石</button>
+                    <button class="site-btn" data-site="huanqiutan" onclick="selectSite('huanqiutan')">圜丘坛</button>
+                </div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">声学仿真参数</div>
+                <div class="control-row">
+                    <label>声源频率</label>
+                    <input type="range" id="freq-slider" min="100" max="8000" value="1000" oninput="updateParam('freq', this.value)">
+                    <span class="value" id="freq-value">1000</span>
+                </div>
+                <div class="control-row">
+                    <label>反射次数</label>
+                    <input type="range" id="refl-slider" min="1" max="20" value="8" oninput="updateParam('refl', this.value)">
+                    <span class="value" id="refl-value">8</span>
+                </div>
+                <div class="control-row">
+                    <label>声线数量</label>
+                    <input type="range" id="rays-slider" min="10" max="500" value="100" oninput="updateParam('rays', this.value)">
+                    <span class="value" id="rays-value">100</span>
+                </div>
+                <div class="control-row">
+                    <label>粒子速度</label>
+                    <input type="range" id="speed-slider" min="1" max="10" value="5" oninput="updateParam('speed', this.value)">
+                    <span class="value" id="speed-value">5</span>
+                </div>
+                <button class="action-btn" onclick="runAcousticSimulation()">▶ 运行几何声学仿真</button>
+                <button class="action-btn secondary" onclick="runWaveSimulation()">◉ 计算波动声场</button>
+                <button class="action-btn secondary" onclick="toggleParticles()">
+                    <span id="particle-toggle">⏸ 暂停粒子动画</span>
+                </button>
+            </div>
+
+            <div class="section">
+                <div class="section-title">实时声学参数</div>
+                <div class="metric-grid">
+                    <div class="metric-card">
+                        <div class="metric-label">混响时间 T60</div>
+                        <div class="metric-value" id="val-t60">--<span class="metric-unit">s</span></div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-card">
+                        <div class="metric-label">声压级 SPL</div>
+                        <div class="metric-value" id="val-spl">--<span class="metric-unit">dB</span></div>
+                    </div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">混响 EDT</div>
+                        <div class="metric-value" id="val-edt">--<span class="metric-unit">s</span></div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">清晰度 C50</div>
+                        <div class="metric-value" id="val-c50">--<span class="metric-unit">dB</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">语音清晰度 (STI)</div>
+                <div class="metric-grid" style="grid-template-columns: 1fr 1fr;">
+                    <div class="metric-card">
+                        <div class="metric-label">STI 指标</div>
+                        <div class="metric-value" id="val-sti">--</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">RASTI</div>
+                        <div class="metric-value" id="val-rasti">--</div>
+                    </div>
+                </div>
+                <div class="sti-bar">
+                    <div class="sti-bar-fill" id="sti-bar" style="width: 0%"></div>
+                </div>
+                <div class="sti-labels">
+                    <span>0 差</span><span>0.45</span><span>0.60 中</span><span>0.75 良</span><span>1.0 优</span>
+                </div>
+                <div style="margin-top: 8px;">
+                    <div class="metric-label" style="margin-bottom: 4px;">语言可懂度等级</div>
+                    <div style="font-size: 14px; color: #d4af37; font-weight: bold;" id="sti-quality">--</div>
+                </div>
+                <button class="action-btn" style="margin-top: 10px;" onclick="runStiAnalysis()">🎙 分析古代祭祀语音</button>
+            </div>
+
+            <div class="section">
+                <div class="section-title">声场分布云图</div>
+                <canvas id="sound-field-canvas"></canvas>
+                <div class="legend">
+                    <span style="font-size: 10px;">低</span>
+                    <div class="legend-gradient"></div>
+                    <span style="font-size: 10px;">高</span>
+                </div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">系统告警</div>
+                <div class="alert-list" id="alert-list">
+                    <div style="color: #808070; font-size: 11px; text-align: center; padding: 10px;">暂无告警信息</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+
+    <script>
+        const API_BASE = window.location.protocol === 'file:' ? 'http://localhost:8080' : '';
+
+        let scene, camera, renderer, controls;
+        let particleCanvas, particleCtx;
+        let soundFieldCanvas, soundFieldCtx;
+        let currentSite = 'huiyinbi';
+        let simParams = { frequency: 1000, reflections: 8, rays: 100, speed: 5 };
+        let particles = [];
+        let particleRunning = true;
+        let soundPaths = [];
+        let lastTime = performance.now();
+        let frameCount = 0;
+
+        const siteColors = {
+            huiyinbi: { wall: 0x8b6914, accent: 0xd4af37 },
+            sanyinshi: { wall: 0x696969, accent: 0xa0a0a0 },
+            huanqiutan: { wall: 0xf5f5f5, accent: 0xd4af37 }
+        };
+
+        function initThreeJS() {
+            const canvas = document.getElementById('three-canvas');
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0a0a1a);
+            scene.fog = new THREE.FogExp2(0x0a0a1a, 0.008);
+
+            camera = new THREE.PerspectiveCamera(60, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
+            camera.position.set(50, 45, 70);
+
+            renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+            renderer.shadowMap.enabled = true;
+
+            controls = new THREE.OrbitControls(camera, canvas);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.08;
+            controls.target.set(0, 2, -10);
+
+            const ambient = new THREE.AmbientLight(0x404050, 0.6);
+            scene.add(ambient);
+            const sun = new THREE.DirectionalLight(0xffeedd, 1.2);
+            sun.position.set(50, 80, 40);
+            sun.castShadow = true;
+            sun.shadow.mapSize.width = 2048;
+            sun.shadow.mapSize.height = 2048;
+            sun.shadow.camera.left = -80; sun.shadow.camera.right = 80;
+            sun.shadow.camera.top = 80; sun.shadow.camera.bottom = -80;
+            scene.add(sun);
+            const fill = new THREE.DirectionalLight(0x8888ff, 0.3);
+            fill.position.set(-30, 20, -40);
+            scene.add(fill);
+
+            buildTiantanComplex();
+            buildGround();
+            animate();
+        }
+
+        function buildGround() {
+            const ground = new THREE.Mesh(
+                new THREE.PlaneGeometry(400, 400),
+                new THREE.MeshStandardMaterial({ color: 0x1a1810, roughness: 0.95 })
+            );
+            ground.rotation.x = -Math.PI / 2;
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+            const grid = new THREE.GridHelper(300, 60, 0x4a3a1a, 0x2a2010);
+            grid.position.y = 0.01;
+            scene.add(grid);
+        }
+
+        function buildTiantanComplex() {
+            buildHuiyinbi(0, 0, 0);
+            buildSanyinshi(0, 0, 5);
+            buildHuanqiutan(0, 0, -30);
+        }
+
+        function buildHuiyinbi(cx, cy, cz) {
+            const radius = 30.75;
+            const height = 3.72;
+            const seg = 96;
+            const ringGeom = new THREE.TorusGeometry(radius, 0.22, 12, seg);
+            const ringMat = new THREE.MeshStandardMaterial({ color: 0x2a2010, roughness: 0.8 });
+            const topRing = new THREE.Mesh(ringGeom, ringMat);
+            topRing.position.set(cx, height, cz);
+            topRing.rotation.x = Math.PI / 2;
+            scene.add(topRing);
+
+            const wallGeom = new THREE.CylinderGeometry(radius, radius, height, seg, 1, true);
+            const wallMat = new THREE.MeshStandardMaterial({
+                color: 0x8b6914, roughness: 0.85, side: THREE.DoubleSide,
+                emissive: 0x2a1a05, emissiveIntensity: 0.15
+            });
+            const wall = new THREE.Mesh(wallGeom, wallMat);
+            wall.position.set(cx, height / 2, cz);
+            wall.castShadow = true; wall.receiveShadow = true;
+            wall.userData.siteId = 'huiyinbi';
+            wall.userData.isWall = true;
+            scene.add(wall);
+
+            for (let i = 0; i < 48; i++) {
+                const angle = (i / 48) * Math.PI * 2;
+                const x = cx + (radius - 0.1) * Math.cos(angle);
+                const z = cz + (radius - 0.1) * Math.sin(angle);
+                const pillar = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.4, height, 0.6),
+                    new THREE.MeshStandardMaterial({ color: 0x6a5010, roughness: 0.9 })
+                );
+                pillar.position.set(x, height / 2, z);
+                pillar.rotation.y = -angle;
+                pillar.castShadow = true;
+                scene.add(pillar);
+            }
+
+            const domeGeom = new THREE.SphereGeometry(4, 24, 16, 0, Math.PI * 2, 0, Math.PI / 2);
+            const domeMat = new THREE.MeshStandardMaterial({
+                color: 0x1a3a6a, metalness: 0.6, roughness: 0.3,
+                emissive: 0x0a1a3a, emissiveIntensity: 0.2
+            });
+            const dome = new THREE.Mesh(domeGeom, domeMat);
+            dome.position.set(cx, height + 1.5, cz);
+            dome.castShadow = true;
+            scene.add(dome);
+
+            const baseGeom = new THREE.CylinderGeometry(5.5, 6, 1.2, 32);
+            const base = new THREE.Mesh(baseGeom, new THREE.MeshStandardMaterial({ color: 0x9a8a6a, roughness: 0.7 }));
+            base.position.set(cx, 0.6, cz);
+            base.castShadow = true; base.receiveShadow = true;
+            scene.add(base);
+
+            const stepsGeom = new THREE.CylinderGeometry(7.5, 8, 0.3, 32);
+            const steps = new THREE.Mesh(stepsGeom, new THREE.MeshStandardMaterial({ color: 0x8a7a5a, roughness: 0.8 }));
+            steps.position.set(cx, 0.15, cz);
+            steps.receiveShadow = true;
+            scene.add(steps);
+
+            const label = createSiteLabel("回音壁", cx, height + 8, cz, 0xd4af37);
+            scene.add(label);
+        }
+
+        function buildSanyinshi(cx, cy, cz) {
+            for (let i = 0; i < 3; i++) {
+                const stone = new THREE.Mesh(
+                    new THREE.BoxGeometry(1.2, 0.2, 1.2),
+                    new THREE.MeshStandardMaterial({
+                        color: 0x808080, roughness: 0.9,
+                        emissive: 0x333300, emissiveIntensity: 0.05 + i * 0.03
+                    })
+                );
+                stone.position.set(cx, 0.1, cz + (i - 1) * 1.0);
+                stone.castShadow = true; stone.receiveShadow = true;
+                stone.userData.siteId = 'sanyinshi';
+                stone.userData.stoneIndex = i + 1;
+                scene.add(stone);
+            }
+
+            const plaza = new THREE.Mesh(
+                new THREE.PlaneGeometry(10, 3),
+                new THREE.MeshStandardMaterial({ color: 0x505050, roughness: 0.85 })
+            );
+            plaza.rotation.x = -Math.PI / 2;
+            plaza.position.set(cx, 0.02, cz);
+            plaza.receiveShadow = true;
+            scene.add(plaza);
+
+            const label = createSiteLabel("三音石", cx, 3, cz, 0xc0c0c0);
+            scene.add(label);
+        }
+
+        function buildHuanqiutan(cx, cy, cz) {
+            const layers = [
+                { r: 11.5, y: 5.0, h: 1.6 },
+                { r: 16.5, y: 3.4, h: 1.6 },
+                { r: 21.5, y: 1.8, h: 1.6 }
+            ];
+            layers.forEach((layer, idx) => {
+                const slab = new THREE.Mesh(
+                    new THREE.CylinderGeometry(layer.r, layer.r + 0.3, layer.h, 64),
+                    new THREE.MeshStandardMaterial({
+                        color: 0xf0ebe0, roughness: 0.6,
+                        emissive: 0x2a2010, emissiveIntensity: 0.05
+                    })
+                );
+                slab.position.set(cx, layer.y, cz);
+                slab.castShadow = true; slab.receiveShadow = true;
+                scene.add(slab);
+
+                const ring = new THREE.Mesh(
+                    new THREE.TorusGeometry(layer.r, 0.15, 8, 64),
+                    new THREE.MeshStandardMaterial({ color: 0xd4af37, metalness: 0.7, roughness: 0.3 })
+                );
+                ring.rotation.x = Math.PI / 2;
+                ring.position.set(cx, layer.y + layer.h / 2, cz);
+                scene.add(ring);
+
+                for (let i = 0; i < 8; i++) {
+                    const angle = (i / 8) * Math.PI * 2 + idx * 0.1;
+                    const stair = new THREE.Mesh(
+                        new THREE.BoxGeometry(1.5, layer.h + 0.2, 2),
+                        new THREE.MeshStandardMaterial({ color: 0xe0d8c8, roughness: 0.7 })
+                    );
+                    stair.position.set(
+                        cx + (layer.r + 1) * Math.cos(angle),
+                        layer.y - 0.1,
+                        cz + (layer.r + 1) * Math.sin(angle)
+                    );
+                    stair.rotation.y = -angle + Math.PI / 2;
+                    stair.castShadow = true;
+                    scene.add(stair);
+                }
+            });
+
+            const centerStone = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.6, 0.6, 0.15, 32),
+                new THREE.MeshStandardMaterial({
+                    color: 0xd4af37, metalness: 0.5, roughness: 0.4,
+                    emissive: 0xd4af37, emissiveIntensity: 0.4
+                })
+            );
+            centerStone.position.set(cx, layers[0].y + layers[0].h / 2 + 0.08, cz);
+            centerStone.userData.siteId = 'huanqiutan';
+            centerStone.userData.isCenter = true;
+            scene.add(centerStone);
+
+            const glowGeom = new THREE.RingGeometry(0.7, 3.0, 32);
+            const glowMat = new THREE.MeshBasicMaterial({
+                color: 0xd4af37, transparent: true, opacity: 0.2, side: THREE.DoubleSide
+            });
+            const glow = new THREE.Mesh(glowGeom, glowMat);
+            glow.rotation.x = -Math.PI / 2;
+            glow.position.set(cx, layers[0].y + layers[0].h / 2 + 0.02, cz);
+            scene.add(glow);
+
+            const label = createSiteLabel("圜丘坛", cx, layers[2].y + 6, cz, 0xd4af37);
+            scene.add(label);
+        }
+
+        function createSiteLabel(text, x, y, z, color) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 256; canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = 'rgba(15, 20, 40, 0.9)';
+            ctx.fillRect(0, 0, 256, 64);
+            ctx.strokeStyle = '#' + color.toString(16).padStart(6, '0');
+            ctx.lineWidth = 2;
+            ctx.strokeRect(1, 1, 254, 62);
+            ctx.fillStyle = '#' + color.toString(16).padStart(6, '0');
+            ctx.font = 'bold 28px "Microsoft YaHei"';
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText(text, 128, 32);
+            const tex = new THREE.CanvasTexture(canvas);
+            const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
+            sprite.position.set(x, y, z);
+            sprite.scale.set(6, 1.5, 1);
+            return sprite;
+        }
+
+        function initParticles() {
+            particleCanvas = document.getElementById('particle-canvas');
+            particleCtx = particleCanvas.getContext('2d');
+            resizeParticleCanvas();
+            window.addEventListener('resize', () => { resizeParticleCanvas(); resizeRenderer(); });
+        }
+
+        function resizeParticleCanvas() {
+            const main = document.querySelector('.main-view');
+            particleCanvas.width = main.clientWidth;
+            particleCanvas.height = main.clientHeight;
+        }
+
+        function resizeRenderer() {
+            const canvas = document.getElementById('three-canvas');
+            camera.aspect = canvas.clientWidth / canvas.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+        }
+
+        function initSoundField() {
+            soundFieldCanvas = document.getElementById('sound-field-canvas');
+            soundFieldCtx = soundFieldCanvas.getContext('2d');
+            soundFieldCanvas.width = soundFieldCanvas.clientWidth;
+            soundFieldCanvas.height = soundFieldCanvas.clientHeight;
+            drawEmptyField();
+        }
+
+        function drawEmptyField() {
+            soundFieldCtx.fillStyle = 'rgba(0,0,0,0.8)';
+            soundFieldCtx.fillRect(0, 0, soundFieldCanvas.width, soundFieldCanvas.height);
+            soundFieldCtx.fillStyle = '#808070';
+            soundFieldCtx.font = '13px "Microsoft YaHei"';
+            soundFieldCtx.textAlign = 'center';
+            soundFieldCtx.fillText('点击"计算波动声场"生成云图', soundFieldCanvas.width / 2, soundFieldCanvas.height / 2);
+        }
+
+        function worldToScreen(x, y, z) {
+            const vec = new THREE.Vector3(x, y, z);
+            vec.project(camera);
+            const main = document.querySelector('.main-view');
+            return {
+                x: (vec.x * 0.5 + 0.5) * main.clientWidth,
+                y: (-vec.y * 0.5 + 0.5) * main.clientHeight,
+                visible: vec.z < 1
+            };
+        }
+
+        function spawnParticlesFromPaths(paths) {
+            particles = [];
+            paths.forEach(path => {
+                if (path.path_points.length < 2) return;
+                const color = getAttenuationColor(path.attenuation_db);
+                for (let p = 0; p < path.path_points.length - 1; p++) {
+                    const start = path.path_points[p];
+                    const end = path.path_points[p + 1];
+                    particles.push({
+                        x: start.x, y: start.y, z: start.z,
+                        tx: end.x, ty: end.y, tz: end.z,
+                        progress: Math.random() * 0.3,
+                        speed: 0.008 + Math.random() * 0.008,
+                        size: 2 + Math.random() * 2,
+                        color,
+                        alpha: 0.6 + Math.random() * 0.4,
+                        life: 1,
+                        segment: p
+                    });
+                }
+            });
+            soundPaths = paths;
+            document.getElementById('ray-count').textContent = paths.length;
+            document.getElementById('particle-count').textContent = particles.length;
+        }
+
+        function getAttenuationColor(db) {
+            if (db < 20) return { r: 68, g: 255, b: 68 };
+            if (db < 40) return { r: 255, g: 255, b: 68 };
+            if (db < 60) return { r: 255, g: 170, b: 68 };
+            return { r: 255, g: 68, b: 68 };
+        }
+
+        function updateParticles(dt) {
+            if (!particleRunning) return;
+            const speedMult = simParams.speed / 5;
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.progress += p.speed * speedMult * dt * 0.06;
+                if (p.progress >= 1) {
+                    const path = soundPaths.find(pp => pp.path_points.length > p.segment + 2);
+                    if (path) {
+                        const next = path.path_points[p.segment + 1];
+                        const nextEnd = path.path_points[p.segment + 2];
+                        if (next && nextEnd) {
+                            p.x = next.x; p.y = next.y; p.z = next.z;
+                            p.tx = nextEnd.x; p.ty = nextEnd.y; p.tz = nextEnd.z;
+                            p.progress = 0;
+                            p.segment++;
+                            continue;
+                        }
+                    }
+                    p.life -= 0.01 * dt;
+                }
+                p.alpha = Math.min(1, p.life);
+                if (p.life <= 0 || p.alpha <= 0) particles.splice(i, 1);
+            }
+            document.getElementById('particle-count').textContent = particles.length;
+        }
+
+        function renderParticles() {
+            particleCtx.clearRect(0, 0, particleCanvas.width, particleCanvas.height);
+            if (soundPaths.length > 0) {
+                particleCtx.strokeStyle = 'rgba(212, 175, 55, 0.04)';
+                particleCtx.lineWidth = 1;
+                soundPaths.forEach(path => {
+                    if (path.path_points.length < 2) return;
+                    particleCtx.beginPath();
+                    let first = true;
+                    for (const pt of path.path_points) {
+                        const s = worldToScreen(pt.x, pt.y, pt.z);
+                        if (!s.visible) { first = true; continue; }
+                        if (first) { particleCtx.moveTo(s.x, s.y); first = false; }
+                        else particleCtx.lineTo(s.x, s.y);
+                    }
+                    particleCtx.stroke();
+                });
+            }
+            particles.forEach(p => {
+                const x = p.x + (p.tx - p.x) * p.progress;
+                const y = p.y + (p.ty - p.y) * p.progress;
+                const z = p.z + (p.tz - p.z) * p.progress;
+                const s = worldToScreen(x, y, z);
+                if (!s.visible) return;
+                particleCtx.beginPath();
+                const grad = particleCtx.createRadialGradient(s.x, s.y, 0, s.x, s.y, p.size * 3);
+                grad.addColorStop(0, `rgba(${p.color.r},${p.color.g},${p.color.b},${p.alpha})`);
+                grad.addColorStop(1, `rgba(${p.color.r},${p.color.g},${p.color.b},0)`);
+                particleCtx.fillStyle = grad;
+                particleCtx.arc(s.x, s.y, p.size * 3, 0, Math.PI * 2);
+                particleCtx.fill();
+                particleCtx.beginPath();
+                particleCtx.fillStyle = `rgba(255,255,255,${p.alpha})`;
+                particleCtx.arc(s.x, s.y, p.size * 0.6, 0, Math.PI * 2);
+                particleCtx.fill();
+            });
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const now = performance.now();
+            const dt = now - lastTime;
+            lastTime = now;
+            frameCount++;
+            if (frameCount % 30 === 0) {
+                document.getElementById('fps').textContent = Math.round(1000 / (dt + 0.001));
+            }
+            controls.update();
+            updateParticles(dt);
+            renderParticles();
+            renderer.render(scene, camera);
+        }
+
+        function selectSite(site) {
+            currentSite = site;
+            document.querySelectorAll('.site-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.site === site);
+            });
+            let pos;
+            if (site === 'huiyinbi') pos = { x: 0, y: 0, z: 0 };
+            else if (site === 'sanyinshi') pos = { x: 0, y: 0, z: 5 };
+            else pos = { x: 0, y: 0, z: -30 };
+            smoothCameraMove(pos.x + 45, pos.y + 40, pos.z + 45, pos.x, pos.y + 2, pos.z);
+            loadLatestData(site);
+        }
+
+        function smoothCameraMove(tx, ty, tz, lx, ly, lz) {
+            const start = { x: camera.position.x, y: camera.position.y, z: camera.position.z };
+            const targetStart = { x: controls.target.x, y: controls.target.y, z: controls.target.z };
+            const duration = 800;
+            const t0 = performance.now();
+            function step() {
+                const p = Math.min(1, (performance.now() - t0) / duration);
+                const ease = p < 0.5 ? 2 * p * p : -1 + (4 - 2 * p) * p;
+                camera.position.x = start.x + (tx - start.x) * ease;
+                camera.position.y = start.y + (ty - start.y) * ease;
+                camera.position.z = start.z + (tz - start.z) * ease;
+                controls.target.x = targetStart.x + (lx - targetStart.x) * ease;
+                controls.target.y = targetStart.y + (ly - targetStart.y) * ease;
+                controls.target.z = targetStart.z + (lz - targetStart.z) * ease;
+                if (p < 1) requestAnimationFrame(step);
+            }
+            step();
+        }
+
+        function setView(mode) {
+            let pos, look;
+            if (mode === 'top') { pos = [0, 100, 0.01]; look = [0, 0, -10]; }
+            else if (mode === 'front') { pos = [0, 20, 90]; look = [0, 2, -10]; }
+            else if (mode === 'side') { pos = [90, 20, 0]; look = [0, 2, -10]; }
+            else if (mode === 'perspective') { pos = [55, 45, 65]; look = [0, 2, -10]; }
+            else { pos = [50, 45, 70]; look = [0, 2, -10]; }
+            smoothCameraMove(pos[0], pos[1], pos[2], look[0], look[1], look[2]);
+        }
+
+        function updateParam(key, value) {
+            simParams[key === 'freq' ? 'frequency' : key === 'refl' ? 'reflections' : key === 'rays' ? 'rays' : 'speed'] = Number(value);
+            document.getElementById(key + '-value').textContent = value;
+        }
+
+        async function apiCall(method, path, body) {
+            try {
+                document.getElementById('status-dot').classList.remove('disconnected');
+                document.getElementById('status-text').textContent = '通信中...';
+                const opts = { method, headers: { 'Content-Type': 'application/json' } };
+                if (body) opts.body = JSON.stringify(body);
+                const res = await fetch(API_BASE + path, opts);
+                document.getElementById('status-text').textContent = '后端已连接';
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                return await res.json();
+            } catch (e) {
+                document.getElementById('status-dot').classList.add('disconnected');
+                document.getElementById('status-text').textContent = '连接失败: ' + e.message;
+                return null;
+            }
+        }
+
+        async function runAcousticSimulation() {
+            const site = {
+                huiyinbi: { x: 0, y: 1.5, z: 0 },
+                sanyinshi: { x: 0, y: 0.5, z: 5 },
+                huanqiutan: { x: 0, y: 5.8, z: -30 }
+            }[currentSite];
+            const result = await apiCall('POST', '/api/simulate/acoustics', {
+                site_id: currentSite,
+                source_position: site,
+                frequency: simParams.frequency,
+                max_reflections: simParams.reflections,
+                num_rays: simParams.rays,
+                temperature: 20, humidity: 50
+            });
+            if (result && result.success && result.data) {
+                spawnParticlesFromPaths(result.data);
+                if (result.data.length > 0) {
+                    const avgAtt = result.data.reduce((s, p) => s + p.attenuation_db, 0) / result.data.length;
+                    const avgT = result.data.reduce((s, p) => s + p.travel_time, 0) / result.data.length;
+                    const t60 = Math.max(0.5, avgT * 3);
+                    document.getElementById('val-t60').innerHTML = t60.toFixed(2) + '<span class="metric-unit">s</span>';
+                    document.getElementById('val-edt').innerHTML = (t60 * 0.8).toFixed(2) + '<span class="metric-unit">s</span>';
+                    document.getElementById('val-spl').innerHTML = (85 - avgAtt * 0.3).toFixed(1) + '<span class="metric-unit">dB</span>';
+                }
+            }
+        }
+
+        async function runWaveSimulation() {
+            const site = {
+                huiyinbi: { x: 0, y: 1.5, z: 0 },
+                sanyinshi: { x: 0, y: 0.5, z: 5 },
+                huanqiutan: { x: 0, y: 5.8, z: -30 }
+            }[currentSite];
+            const result = await apiCall('POST', '/api/simulate/wave-field', {
+                site_id: currentSite, source_position: site,
+                frequency: simParams.frequency, max_reflections: simParams.reflections,
+                num_rays: simParams.rays, temperature: 20, humidity: 50
+            });
+            if (result && result.success && result.data) {
+                drawSoundField(result.data);
+            }
+        }
+
+        function drawSoundField(snapshot) {
+            const w = soundFieldCanvas.width, h = soundFieldCanvas.height;
+            const field = snapshot.pressure_field;
+            if (!field || field.length === 0) return;
+            const cols = field.length;
+            const rows = field[0].length;
+            soundFieldCtx.clearRect(0, 0, w, h);
+            const cellW = w / cols, cellH = h / rows;
+            for (let i = 0; i < cols; i++) {
+                for (let j = 0; j < rows; j++) {
+                    const v = field[i][j];
+                    soundFieldCtx.fillStyle = pressureToColor(v);
+                    soundFieldCtx.fillRect(i * cellW, j * cellH, cellW + 1, cellH + 1);
+                }
+            }
+            const src = snapshot.source_position;
+            const sx = (cols / 2) * cellW;
+            const sy = (rows / 2) * cellH;
+            soundFieldCtx.beginPath();
+            soundFieldCtx.arc(sx, sy, 6, 0, Math.PI * 2);
+            soundFieldCtx.fillStyle = '#ffffff';
+            soundFieldCtx.fill();
+            soundFieldCtx.strokeStyle = '#d4af37';
+            soundFieldCtx.lineWidth = 2;
+            soundFieldCtx.stroke();
+        }
+
+        function pressureToColor(v) {
+            v = Math.max(0, Math.min(1, v));
+            const stops = [
+                [0, [0, 0, 128]],
+                [0.16, [0, 128, 255]],
+                [0.33, [0, 255, 255]],
+                [0.5, [128, 255, 128]],
+                [0.66, [255, 255, 0]],
+                [0.83, [255, 128, 0]],
+                [1, [255, 0, 0]]
+            ];
+            for (let i = 0; i < stops.length - 1; i++) {
+                if (v >= stops[i][0] && v <= stops[i + 1][0]) {
+                    const t = (v - stops[i][0]) / (stops[i + 1][0] - stops[i][0]);
+                    const c1 = stops[i][1], c2 = stops[i + 1][1];
+                    const r = Math.round(c1[0] + (c2[0] - c1[0]) * t);
+                    const g = Math.round(c1[1] + (c2[1] - c1[1]) * t);
+                    const b = Math.round(c1[2] + (c2[2] - c1[2]) * t);
+                    return `rgba(${r},${g},${b},0.9)`;
+                }
+            }
+            return '#000080';
+        }
+
+        async function runStiAnalysis() {
+            const ir_len = 512;
+            const ir = [];
+            for (let i = 0; i < ir_len; i++) {
+                const t = i / 44100;
+                const decay = Math.exp(-3 * t);
+                const peak = i === 42 ? 1.0 : 0;
+                const echo1 = Math.abs(i - 180) < 10 ? 0.5 * Math.exp(-Math.pow(i - 180, 2) / 100) : 0;
+                const echo2 = Math.abs(i - 320) < 15 ? 0.35 * Math.exp(-Math.pow(i - 320, 2) / 200) : 0;
+                ir.push((peak + echo1 + echo2) * decay + (Math.random() - 0.5) * 0.02);
+            }
+            const result = await apiCall('POST', '/api/simulate/sti', {
+                site_id: currentSite, impulse_response: ir,
+                sample_rate: 44100, background_noise_level: 35, speech_level: 70
+            });
+            if (result && result.success && result.data) {
+                const d = result.data;
+                document.getElementById('val-sti').textContent = d.sti_value.toFixed(3);
+                document.getElementById('val-rasti').textContent = d.rasti_value.toFixed(3);
+                document.getElementById('val-c50').innerHTML = d.clarity_c50.toFixed(1) + '<span class="metric-unit">dB</span>';
+                const stiPct = Math.max(0, Math.min(100, d.sti_value * 100));
+                document.getElementById('sti-bar').style.width = stiPct + '%';
+                let q;
+                if (d.sti_value >= 0.85) q = '优秀 · 祭祀语音清晰可辨';
+                else if (d.sti_value >= 0.75) q = '良好 · 语音信息传达完整';
+                else if (d.sti_value >= 0.60) q = '中等 · 主要语义可理解';
+                else if (d.sti_value >= 0.45) q = '较差 · 需仔细聆听';
+                else if (d.sti_value >= 0.30) q = '差 · 部分语音失真';
+                else q = '不可接受 · 声学特性严重退化';
+                document.getElementById('sti-quality').textContent = q;
+            }
+        }
+
+        async function loadLatestData(site) {
+            const [measRes, stiRes, alertRes] = await Promise.all([
+                apiCall('GET', `/api/measurements/${site}?limit=1`),
+                apiCall('GET', `/api/intelligibility?site_id=${site}&limit=1`),
+                apiCall('GET', `/api/alerts?limit=10`)
+            ]);
+            if (measRes && measRes.success && measRes.data && measRes.data.length > 0) {
+                const m = measRes.data[0];
+                document.getElementById('val-t60').innerHTML = m.reverb_time_t60.toFixed(2) + '<span class="metric-unit">s</span>';
+                document.getElementById('val-edt').innerHTML = m.reverb_time_edt.toFixed(2) + '<span class="metric-unit">s</span>';
+                document.getElementById('val-spl').innerHTML = m.sound_pressure_level.toFixed(1) + '<span class="metric-unit">dB</span>';
+            }
+            if (stiRes && stiRes.success && stiRes.data && stiRes.data.length > 0) {
+                const s = stiRes.data[0];
+                document.getElementById('val-sti').textContent = s.sti_value.toFixed(3);
+                document.getElementById('val-rasti').textContent = s.rasti_value.toFixed(3);
+                document.getElementById('val-c50').innerHTML = s.clarity_c50.toFixed(1) + '<span class="metric-unit">dB</span>';
+                document.getElementById('sti-bar').style.width = Math.max(0, Math.min(100, s.sti_value * 100)) + '%';
+            }
+            renderAlerts(alertRes);
+        }
+
+        function renderAlerts(res) {
+            const container = document.getElementById('alert-list');
+            if (!res || !res.success || !res.data || res.data.length === 0) {
+                container.innerHTML = '<div style="color:#808070;font-size:11px;text-align:center;padding:10px;">暂无告警信息</div>';
+                return;
+            }
+            container.innerHTML = res.data.map(a => {
+                const sev = a.severity || 'info';
+                const cls = sev === 'critical' ? '' : sev === 'warning' ? 'warning' : 'info';
+                const t = new Date(a.timestamp || Date.now());
+                return `<div class="alert-item ${cls}">
+                    <span class="alert-severity ${sev}">${sev.toUpperCase()}</span>
+                    <span style="color:#a08050;margin-left:6px;">${a.metric_name}</span>
+                    <div class="alert-desc">${a.description}</div>
+                    <div class="alert-time">${t.toLocaleTimeString()}</div>
+                </div>`;
+            }).join('');
+        }
+
+        function toggleParticles() {
+            particleRunning = !particleRunning;
+            document.getElementById('particle-toggle').textContent = particleRunning ? '⏸ 暂停粒子动画' : '▶ 继续粒子动画';
+        }
+
+        window.addEventListener('load', () => {
+            initThreeJS();
+            initParticles();
+            initSoundField();
+            setTimeout(() => loadLatestData(currentSite), 800);
+            setInterval(() => loadLatestData(currentSite), 10000);
+        });
+    </script>
+</body>
+</html>
