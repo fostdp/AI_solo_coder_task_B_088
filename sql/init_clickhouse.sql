@@ -276,3 +276,147 @@ GROUP BY day, site_id, alert_type, severity;
 ALTER TABLE acoustic_measurements MODIFY TTL timestamp + INTERVAL 1 YEAR;
 ALTER TABLE sound_propagation_paths MODIFY TTL timestamp + INTERVAL 6 MONTH;
 ALTER TABLE acoustic_alerts MODIFY TTL timestamp + INTERVAL 2 YEAR;
+
+-- ============================================================
+-- 建筑元数据表 (新增)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS building_meta
+(
+    building_id String,
+    name String,
+    category LowCardinality(String),
+    dynasty Nullable(String),
+    era_year Nullable(Int32),
+    location String,
+    architecture_style String,
+    description String,
+    acoustic_features Array(String),
+    historical_significance String,
+    dimensions_x Float64,
+    dimensions_y Float64,
+    dimensions_z Float64,
+    volume_cubic_meters Float64,
+    seating_capacity Nullable(UInt32),
+    wall_material String,
+    ceiling_material String,
+    floor_material String,
+    wall_absorption Float64,
+    ceiling_absorption Float64,
+    floor_absorption Float64,
+    typical_reverb_t60 Float64,
+    geometry_type LowCardinality(String),
+    center_x Float64,
+    center_y Float64,
+    center_z Float64,
+    created_at DateTime DEFAULT now()
+)
+ENGINE = MergeTree()
+ORDER BY (building_id);
+
+-- ============================================================
+-- 声学对比分析结果表 (新增)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS acoustic_comparison_results
+(
+    comparison_id UUID DEFAULT generateUUIDv4(),
+    timestamp DateTime DEFAULT now(),
+    site_ids Array(String),
+    frequency Float64,
+    background_noise_db Float64,
+    best_for_speech String,
+    best_for_music String,
+    best_for_echo String,
+    overall_ranking Array(String),
+    metric_names Array(String),
+    metric_units Array(String),
+    metric_descriptions Array(String)
+)
+ENGINE = MergeTree()
+ORDER BY (timestamp, comparison_id)
+TTL timestamp + INTERVAL 1 YEAR;
+
+-- ============================================================
+-- 噪声模拟结果表 (新增)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS noise_simulation_results
+(
+    simulation_id UUID DEFAULT generateUUIDv4(),
+    timestamp DateTime DEFAULT now(),
+    site_id LowCardinality(String),
+    total_noise_level_db Float64,
+    speech_level_db Float64,
+    snr_db Float64,
+    sti_clean Float64,
+    sti_noisy Float64,
+    sti_degradation Float64,
+    recommended_max_visitors UInt32,
+    grid_resolution UInt16,
+    crowd_noise_map Array(Array(Float64))
+)
+ENGINE = MergeTree()
+ORDER BY (site_id, timestamp)
+TTL timestamp + INTERVAL 6 MONTH;
+
+-- ============================================================
+-- 虚拟体验记录表 (新增)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS virtual_experience_logs
+(
+    experience_id UUID DEFAULT generateUUIDv4(),
+    timestamp DateTime DEFAULT now(),
+    site_id LowCardinality(String),
+    source_x Float64,
+    source_y Float64,
+    source_z Float64,
+    listener_x Float64,
+    listener_y Float64,
+    listener_z Float64,
+    speech_text Nullable(String),
+    frequency Float64,
+    include_noise UInt8,
+    sti_without_noise Float64,
+    sti_with_noise Float64,
+    echo_count UInt32,
+    echo_delay_1 Float64,
+    echo_delay_2 Float64,
+    echo_delay_3 Float64,
+    reverberation_time_t60 Float64,
+    sound_preservation_score Float64,
+    itd_seconds Float64,
+    ild_db Float64
+)
+ENGINE = MergeTree()
+ORDER BY (site_id, timestamp)
+TTL timestamp + INTERVAL 1 YEAR;
+
+-- ============================================================
+-- 虚拟体验小时统计物化视图 (新增)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS virtual_experience_hourly_stats
+(
+    site_id LowCardinality(String),
+    hour DateTime,
+    experience_count UInt64,
+    avg_sti_clean Float64,
+    avg_sti_noisy Float64,
+    avg_echo_count Float64,
+    avg_t60 Float64,
+    avg_preservation_score Float64
+)
+ENGINE = SummingMergeTree()
+ORDER BY (site_id, hour)
+TTL hour + INTERVAL 2 YEAR;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS virtual_experience_hourly_mv
+TO virtual_experience_hourly_stats
+AS SELECT
+    site_id,
+    toStartOfHour(timestamp) AS hour,
+    count() AS experience_count,
+    avg(sti_without_noise) AS avg_sti_clean,
+    avg(sti_with_noise) AS avg_sti_noisy,
+    avg(echo_count) AS avg_echo_count,
+    avg(reverberation_time_t60) AS avg_t60,
+    avg(sound_preservation_score) AS avg_preservation_score
+FROM virtual_experience_logs
+GROUP BY site_id, hour;

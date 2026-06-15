@@ -143,10 +143,24 @@ impl<T> ApiResponse<T> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcousticConfig {
     pub sites: HashMap<String, SiteConfig>,
+    pub ancient_buildings: HashMap<String, BuildingMeta>,
+    pub concert_halls: HashMap<String, BuildingMeta>,
     pub simulation_defaults: SimDefaults,
     pub alert_thresholds: AlertThresholds,
+    pub noise_defaults: NoiseDefaults,
     pub valid_site_ids: Vec<String>,
     pub valid_sensor_ids: Vec<String>,
+    pub valid_building_ids: Vec<String>,
+    pub valid_hall_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoiseDefaults {
+    pub visitor_noise_level_db: f64,
+    pub crowd_density_per_sqm: f64,
+    pub max_visitors: u32,
+    pub speech_level_db: f64,
+    pub noise_frequency_hz: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,12 +240,24 @@ pub enum SimulatorRequest {
         params: SimulationParams,
         reply: tokio::sync::oneshot::Sender<SoundFieldSnapshot>,
     },
+    VirtualExperience {
+        params: VirtualExperienceRequest,
+        reply: tokio::sync::oneshot::Sender<VirtualExperienceResult>,
+    },
+    NoiseSimulation {
+        params: NoiseSimulationRequest,
+        reply: tokio::sync::oneshot::Sender<NoiseSimulationResult>,
+    },
 }
 
 pub enum AnalyzerRequest {
     AnalyzeSti {
         params: StiAnalysisParams,
         reply: tokio::sync::oneshot::Sender<SpeechIntelligibility>,
+    },
+    CompareAcoustics {
+        params: AcousticComparisonRequest,
+        reply: tokio::sync::oneshot::Sender<AcousticComparisonResult>,
     },
 }
 
@@ -271,4 +297,175 @@ pub struct SiteInfo {
     pub dimensions: Vec3,
     pub wall_material: String,
     pub wall_absorption: f64,
+    pub dynasty: Option<String>,
+    pub era: Option<String>,
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoiseSource {
+    pub position: Vec3,
+    pub sound_level_db: f64,
+    pub source_type: String,
+    pub frequency_hz: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BinauralImpulseResponse {
+    pub left_ear: Vec<f64>,
+    pub right_ear: Vec<f64>,
+    pub sample_rate: u32,
+    pub listener_position: Vec3,
+    pub source_position: Vec3,
+    pub itd_seconds: f64,
+    pub ild_db: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VirtualExperienceRequest {
+    pub site_id: String,
+    pub source_position: Vec3,
+    pub listener_position: Vec3,
+    pub speech_text: Option<String>,
+    pub frequency: f64,
+    pub include_noise: bool,
+    pub noise_sources: Option<Vec<NoiseSource>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VirtualExperienceResult {
+    pub site_id: String,
+    pub source_position: Vec3,
+    pub listener_position: Vec3,
+    pub direct_path: SoundPath,
+    pub reflection_paths: Vec<SoundPath>,
+    pub total_paths: Vec<SoundPath>,
+    pub impulse_response: Vec<f64>,
+    pub binaural_ir: BinauralImpulseResponse,
+    pub sti_with_noise: f64,
+    pub sti_without_noise: f64,
+    pub speech_intelligibility: SpeechIntelligibility,
+    pub echo_count: u32,
+    pub echo_delay_1: f64,
+    pub echo_delay_2: f64,
+    pub echo_delay_3: f64,
+    pub reverberation_time_t60: f64,
+    pub sound_preservation_score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcousticComparisonRequest {
+    pub site_ids: Vec<String>,
+    pub source_position: Option<Vec3>,
+    pub listener_position: Option<Vec3>,
+    pub frequency: f64,
+    pub background_noise_db: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SiteAcousticMetrics {
+    pub site_id: String,
+    pub site_name: String,
+    pub category: String,
+    pub dynasty: Option<String>,
+    pub reverb_time_t60: f64,
+    pub reverb_time_edt: f64,
+    pub clarity_c50: f64,
+    pub definition_d50: f64,
+    pub sti_value: f64,
+    pub rasti_value: f64,
+    pub sound_pressure_level: f64,
+    pub center_time: f64,
+    pub bass_ratio: f64,
+    pub brilliance: f64,
+    pub intimacy: f64,
+    pub warmth: f64,
+    pub loudness: f64,
+    pub echo_strength: f64,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcousticComparisonResult {
+    pub sites: Vec<SiteAcousticMetrics>,
+    pub comparison_metrics: Vec<ComparisonMetric>,
+    pub best_for_speech: String,
+    pub best_for_music: String,
+    pub best_for_echo: String,
+    pub overall_ranking: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComparisonMetric {
+    pub metric_name: String,
+    pub metric_unit: String,
+    pub values: std::collections::HashMap<String, f64>,
+    pub best_site: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoiseSimulationRequest {
+    pub site_id: String,
+    pub source_position: Vec3,
+    pub listener_position: Vec3,
+    pub noise_sources: Vec<NoiseSource>,
+    pub speech_level_db: f64,
+    pub frequency: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoiseSimulationResult {
+    pub site_id: String,
+    pub total_noise_level_db: f64,
+    pub speech_level_db: f64,
+    pub snr_db: f64,
+    pub sti_clean: f64,
+    pub sti_noisy: f64,
+    pub sti_degradation: f64,
+    pub noise_contribution: std::collections::HashMap<String, f64>,
+    pub recommended_max_visitors: u32,
+    pub crowd_noise_map: Vec<Vec<f64>>,
+    pub grid_resolution: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildingMeta {
+    pub building_id: String,
+    pub name: String,
+    pub category: String,
+    pub dynasty: Option<String>,
+    pub era_year: Option<i32>,
+    pub location: String,
+    pub architecture_style: String,
+    pub description: String,
+    pub acoustic_features: Vec<String>,
+    pub historical_significance: String,
+    pub dimensions: Vec3,
+    pub volume_cubic_meters: f64,
+    pub seating_capacity: Option<u32>,
+    pub wall_material: String,
+    pub ceiling_material: String,
+    pub floor_material: String,
+    pub wall_absorption: f64,
+    pub ceiling_absorption: f64,
+    pub floor_absorption: f64,
+    pub typical_reverb_t60: f64,
+    pub geometry_type: String,
+    pub center_position: Vec3,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AncientDynastyConfig {
+    pub tang_dynasty: BuildingMeta,
+    pub song_dynasty: BuildingMeta,
+    pub ming_dynasty: BuildingMeta,
+    pub qing_dynasty: BuildingMeta,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModernConcertHallConfig {
+    pub shoemaker: BuildingMeta,
+    pub berlin_philharmonie: BuildingMeta,
+    pub boston_symphony: BuildingMeta,
 }

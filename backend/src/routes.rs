@@ -40,7 +40,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/simulate/acoustics", post(run_acoustic_simulation))
         .route("/api/simulate/sti", post(run_sti_analysis))
         .route("/api/simulate/wave-field", post(run_wave_field_simulation))
+        .route("/api/simulate/noise", post(simulate_noise))
         .route("/api/stats", get(get_stats))
+        .route("/api/buildings/ancient", get(get_ancient_buildings))
+        .route("/api/buildings/concert-halls", get(get_concert_halls))
+        .route("/api/compare/acoustics", post(compare_acoustics))
+        .route("/api/experience/virtual", post(virtual_experience))
         .with_state(state)
 }
 
@@ -306,4 +311,121 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> Json<ApiResponse<serde
         "sound_fields_count": f,
     });
     Json(ApiResponse::ok(stats))
+}
+
+async fn get_ancient_buildings(State(state): State<Arc<AppState>>) -> Json<ApiResponse<Vec<crate::models::BuildingMeta>>> {
+    let buildings: Vec<crate::models::BuildingMeta> = state.config.ancient_buildings.values().cloned().collect();
+    counter!("http_requests_total", "endpoint" => "/api/buildings/ancient").increment(1);
+    Json(ApiResponse::ok(buildings))
+}
+
+async fn get_concert_halls(State(state): State<Arc<AppState>>) -> Json<ApiResponse<Vec<crate::models::BuildingMeta>>> {
+    let halls: Vec<crate::models::BuildingMeta> = state.config.concert_halls.values().cloned().collect();
+    counter!("http_requests_total", "endpoint" => "/api/buildings/concert-halls").increment(1);
+    Json(ApiResponse::ok(halls))
+}
+
+async fn compare_acoustics(
+    State(state): State<Arc<AppState>>,
+    Json(params): Json<crate::models::AcousticComparisonRequest>,
+) -> Json<ApiResponse<crate::models::AcousticComparisonResult>> {
+    let start = Instant::now();
+    counter!("http_requests_total", "endpoint" => "/api/compare/acoustics").increment(1);
+
+    if params.site_ids.is_empty() {
+        return Json(ApiResponse::error("至少需要指定一个场所进行对比"));
+    }
+
+    for site_id in &params.site_ids {
+        let is_valid = state.config.valid_site_ids.contains(site_id)
+            || state.config.valid_building_ids.contains(site_id)
+            || state.config.valid_hall_ids.contains(site_id);
+        if !is_valid {
+            return Json(ApiResponse::error(format!("无效的场所/建筑ID: {}", site_id)));
+        }
+    }
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let req = crate::models::AnalyzerRequest::CompareAcoustics { params, reply: reply_tx };
+
+    if state.analyzer_tx.send(req).await.is_err() {
+        return Json(ApiResponse::error("分析模块不可用"));
+    }
+
+    match reply_rx.await {
+        Ok(result) => {
+            histogram!("simulation_duration_seconds", "type" => "compare").record(start.elapsed().as_secs_f64());
+            counter!("comparisons_total").increment(1);
+            Json(ApiResponse::ok(result))
+        }
+        Err(_) => {
+            counter!("simulation_failures_total", "type" => "compare").increment(1);
+            Json(ApiResponse::error("对比分析请求超时"))
+        }
+    }
+}
+
+async fn simulate_noise(
+    State(state): State<Arc<AppState>>,
+    Json(params): Json<crate::models::NoiseSimulationRequest>,
+) -> Json<ApiResponse<crate::models::NoiseSimulationResult>> {
+    let start = Instant::now();
+    counter!("http_requests_total", "endpoint" => "/api/simulate/noise").increment(1);
+
+    if !state.config.valid_site_ids.contains(&params.site_id) {
+        return Json(ApiResponse::error("无效的场所ID"));
+    }
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let req = crate::models::SimulatorRequest::NoiseSimulation { params, reply: reply_tx };
+
+    if state.sim_tx.send(req).await.is_err() {
+        return Json(ApiResponse::error("仿真模块不可用"));
+    }
+
+    match reply_rx.await {
+        Ok(result) => {
+            histogram!("simulation_duration_seconds", "type" => "noise").record(start.elapsed().as_secs_f64());
+            counter!("simulations_total", "type" => "noise").increment(1);
+            Json(ApiResponse::ok(result))
+        }
+        Err(_) => {
+            counter!("simulation_failures_total", "type" => "noise").increment(1);
+            Json(ApiResponse::error("噪声模拟请求超时"))
+        }
+    }
+}
+
+async fn virtual_experience(
+    State(state): State<Arc<AppState>>,
+    Json(params): Json<crate::models::VirtualExperienceRequest>,
+) -> Json<ApiResponse<crate::models::VirtualExperienceResult>> {
+    let start = Instant::now();
+    counter!("http_requests_total", "endpoint" => "/api/experience/virtual").increment(1);
+
+    if !state.config.valid_site_ids.contains(&params.site_id)
+        && !state.config.valid_building_ids.contains(&params.site_id)
+        && !state.config.valid_hall_ids.contains(&params.site_id)
+    {
+        return Json(ApiResponse::error("无效的场所ID"));
+    }
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let req = crate::models::SimulatorRequest::VirtualExperience { params, reply: reply_tx };
+
+    if state.sim_tx.send(req).await.is_err() {
+        return Json(ApiResponse::error("仿真模块不可用"));
+    }
+
+    match reply_rx.await {
+        Ok(result) => {
+            histogram!("simulation_duration_seconds", "type" => "virtual_experience").record(start.elapsed().as_secs_f64());
+            counter!("simulations_total", "type" => "virtual_experience").increment(1);
+            Json(ApiResponse::ok(result))
+        }
+        Err(_) => {
+            counter!("simulation_failures_total", "type" => "virtual_experience").increment(1);
+            Json(ApiResponse::error("虚拟体验请求超时"))
+        }
+    }
 }

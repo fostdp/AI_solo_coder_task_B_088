@@ -1,16 +1,27 @@
-use crate::models::{AnalyzerRequest, AlarmEvent, SpeechIntelligibility, StiAnalysisParams, StiWeightsConfig};
+use crate::models::{
+        AcousticComparisonRequest, AcousticComparisonResult,
+        AnalyzerRequest, AlarmEvent, SpeechIntelligibility,
+        StiAnalysisParams, StiWeightsConfig, AcousticConfig,
+    };
 use std::f64::consts::PI;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 pub struct AnalyzerTask {
     sti_config: StiWeightsConfig,
+    config: Arc<AcousticConfig>,
     rx: mpsc::Receiver<AnalyzerRequest>,
     alarm_tx: mpsc::Sender<AlarmEvent>,
 }
 
 impl AnalyzerTask {
-    pub fn new(sti_config: StiWeightsConfig, rx: mpsc::Receiver<AnalyzerRequest>, alarm_tx: mpsc::Sender<AlarmEvent>) -> Self {
-        Self { sti_config, rx, alarm_tx }
+    pub fn new(
+        sti_config: StiWeightsConfig,
+        config: Arc<AcousticConfig>,
+        rx: mpsc::Receiver<AnalyzerRequest>,
+        alarm_tx: mpsc::Sender<AlarmEvent>,
+    ) -> Self {
+        Self { sti_config, config, rx, alarm_tx }
     }
 
     pub async fn run(&mut self) {
@@ -24,6 +35,10 @@ impl AnalyzerTask {
                         d50: result.definition_d50,
                         c50: result.clarity_c50,
                     }).await;
+                    let _ = reply.send(result);
+                }
+                AnalyzerRequest::CompareAcoustics { params, reply } => {
+                    let result = Self::analyze_comparison(&self.sti_config, &self.config, &params);
                     let _ = reply.send(result);
                 }
             }
@@ -287,6 +302,233 @@ impl AnalyzerTask {
             v if v >= 0.45 => "较差",
             v if v >= 0.30 => "差",
             _ => "不可接受",
+        }
+    }
+
+    pub fn analyze_comparison(
+        sti_config: &crate::models::StiWeightsConfig,
+        config: &std::sync::Arc<crate::models::AcousticConfig>,
+        params: &crate::models::AcousticComparisonRequest,
+    ) -> crate::models::AcousticComparisonResult {
+        use crate::models::*;
+        use std::collections::HashMap;
+
+        let mut site_metrics = Vec::new();
+
+        for site_id in &params.site_ids {
+            let metrics = Self::compute_site_metrics(site_id, config, params.frequency, params.background_noise_db);
+            site_metrics.push(metrics);
+        }
+
+        let mut comparison_metrics = Vec::new();
+        let metric_definitions = [
+            ("reverb_time_t60", "s", "混响时间T60", |m: &SiteAcousticMetrics| m.reverb_time_t60, false),
+            ("clarity_c50", "dB", "语言清晰度C50", |m: &SiteAcousticMetrics| m.clarity_c50, true),
+            ("definition_d50", "%", "语言清晰度D50", |m: &SiteAcousticMetrics| m.definition_d50, true),
+            ("sti_value", "", "语音传输指数STI", |m: &SiteAcousticMetrics| m.sti_value, true),
+            ("rasti_value", "", "快速语音传输指数RASTI", |m: &SiteAcousticMetrics| m.rasti_value, true),
+            ("sound_pressure_level", "dB", "声压级SPL", |m: &SiteAcousticMetrics| m.sound_pressure_level, false),
+            ("center_time", "s", "中心时间Ts", |m: &SiteAcousticMetrics| m.center_time, false),
+            ("bass_ratio", "", "低音比", |m: &SiteAcousticMetrics| m.bass_ratio, true),
+            ("brilliance", "", "明亮度", |m: &SiteAcousticMetrics| m.brilliance, true),
+            ("intimacy", "", "亲切感", |m: &SiteAcousticMetrics| m.intimacy, true),
+            ("warmth", "", "温暖感", |m: &SiteAcousticMetrics| m.warmth, true),
+            ("loudness", "", "响度", |m: &SiteAcousticMetrics| m.loudness, false),
+            ("echo_strength", "", "回声强度", |m: &SiteAcousticMetrics| m.echo_strength, false),
+        ];
+
+        for (name, unit, desc, getter, higher_is_better) in metric_definitions.iter() {
+            let mut values = HashMap::new();
+            let mut best_value = if *higher_is_better { f64::NEG_INFINITY } else { f64::INFINITY };
+            let mut best_site = String::new();
+
+            for m in &site_metrics {
+                let val = getter(m);
+                values.insert(m.site_id.clone(), val);
+                if *higher_is_better {
+                    if val > best_value {
+                        best_value = val;
+                        best_site = m.site_id.clone();
+                    }
+                } else {
+                    if val < best_value {
+                        best_value = val;
+                        best_site = m.site_id.clone();
+                    }
+                }
+            }
+
+            comparison_metrics.push(ComparisonMetric {
+                metric_name: name.to_string(),
+                metric_unit: unit.to_string(),
+                values,
+                best_site,
+                description: desc.to_string(),
+            });
+        }
+
+        let mut best_for_speech = String::new();
+        let mut best_speech_score = f64::NEG_INFINITY;
+        let mut best_for_music = String::new();
+        let mut best_music_score = f64::NEG_INFINITY;
+        let mut best_for_echo = String::new();
+        let mut best_echo_score = f64::NEG_INFINITY;
+
+        for m in &site_metrics {
+            let speech_score = m.sti_value * 0.5 + m.clarity_c50 / 20.0 * 0.3 + m.definition_d50 / 100.0 * 0.2;
+            let music_score = m.reverb_time_t60 / 3.0 * 0.4 + m.warmth * 0.3 + m.bass_ratio * 0.3;
+            let echo_score = m.echo_strength * 0.6 + m.reverb_time_t60 / 4.0 * 0.4;
+
+            if speech_score > best_speech_score {
+                best_speech_score = speech_score;
+                best_for_speech = m.site_id.clone();
+            }
+            if music_score > best_music_score {
+                best_music_score = music_score;
+                best_for_music = m.site_id.clone();
+            }
+            if echo_score > best_echo_score {
+                best_echo_score = echo_score;
+                best_for_echo = m.site_id.clone();
+            }
+        }
+
+        let mut ranked: Vec<SiteAcousticMetrics> = site_metrics.clone();
+        ranked.sort_by(|a, b| b.sti_value.partial_cmp(&a.sti_value).unwrap());
+        let overall_ranking: Vec<String> = ranked.iter().map(|m| m.site_id.clone()).collect();
+
+        AcousticComparisonResult {
+            sites: site_metrics,
+            comparison_metrics,
+            best_for_speech,
+            best_for_music,
+            best_for_echo,
+            overall_ranking,
+        }
+    }
+
+    fn compute_site_metrics(
+        site_id: &str,
+        config: &std::sync::Arc<crate::models::AcousticConfig>,
+        frequency: f64,
+        noise_db: f64,
+    ) -> crate::models::SiteAcousticMetrics {
+        use crate::models::*;
+
+        if let Some(building) = config.ancient_buildings.get(site_id) {
+            return Self::building_to_metrics(building, frequency, noise_db);
+        }
+        if let Some(hall) = config.concert_halls.get(site_id) {
+            return Self::building_to_metrics(hall, frequency, noise_db);
+        }
+
+        let (base_t60, base_spl, description, name) = match site_id {
+            "huiyinbi" => (2.2, 78.0, "天坛皇穹宇圆形围墙，直径61.5米，高3.72米", "回音壁"),
+            "sanyinshi" => (1.2, 72.0, "皇穹宇殿前甬道上的三块石板", "三音石"),
+            "huanqiutan" => (1.8, 75.0, "三层圆形石坛，上层直径23米，高5米", "圜丘坛"),
+            _ => (2.0, 75.0, "未知场所", site_id),
+        };
+
+        let freq_factor = (frequency / 1000.0).powf(0.3);
+        let t60 = base_t60 / freq_factor;
+        let c50 = 3.0 + (1.5 - t60) * 5.0;
+        let d50 = 50.0 + (1.5 - t60) * 20.0;
+        let sti = (0.4 + (1.5 - t60) * 0.3).clamp(0.2, 0.95);
+        let noise_factor = if noise_db > 30.0 {
+            (1.0 - (noise_db - 30.0) / 80.0).max(0.2)
+        } else {
+            1.0
+        };
+        let sti_noisy = sti * noise_factor;
+
+        SiteAcousticMetrics {
+            site_id: site_id.to_string(),
+            site_name: name.to_string(),
+            category: "ancient".to_string(),
+            dynasty: if site_id == "huiyinbi" || site_id == "sanyinshi" || site_id == "huanqiutan" {
+                Some("明/清".to_string())
+            } else {
+                None
+            },
+            reverb_time_t60: t60,
+            reverb_time_edt: t60 * 0.8,
+            clarity_c50: c50.clamp(-5.0, 20.0),
+            definition_d50: d50.clamp(10.0, 90.0),
+            sti_value: sti_noisy,
+            rasti_value: sti_noisy * 1.05,
+            sound_pressure_level: base_spl,
+            center_time: t60 * 0.3,
+            bass_ratio: 1.2,
+            brilliance: 0.7,
+            intimacy: if t60 < 1.5 { 0.8 } else { 0.5 },
+            warmth: 0.6,
+            loudness: (1.0 - t60 / 5.0).clamp(0.0, 1.0),
+            echo_strength: if site_id == "huiyinbi" { 0.95 } else if site_id == "sanyinshi" { 0.85 } else { 0.6 },
+            description: description.to_string(),
+        }
+    }
+
+    fn building_to_metrics(
+        building: &crate::models::BuildingMeta,
+        frequency: f64,
+        noise_db: f64,
+    ) -> crate::models::SiteAcousticMetrics {
+        use crate::models::*;
+
+        let volume = building.volume_cubic_meters;
+        let surface_area = 2.0 * (building.dimensions.x * building.dimensions.z
+            + building.dimensions.x * building.dimensions.y
+            + building.dimensions.z * building.dimensions.y);
+        let avg_absorption = (building.wall_absorption + building.ceiling_absorption + building.floor_absorption) / 3.0;
+
+        let t60 = if avg_absorption > 0.001 {
+            0.161 * volume / (surface_area * avg_absorption)
+        } else {
+            building.typical_reverb_t60
+        };
+
+        let t60 = t60.max(0.5).min(5.0);
+        let freq_factor = (frequency / 1000.0).powf(0.3);
+        let t60_at_freq = t60 / freq_factor;
+
+        let c50 = 3.0 + (1.5 - t60_at_freq) * 5.0;
+        let d50 = 50.0 + (1.5 - t60_at_freq) * 20.0;
+        let sti = (0.4 + (1.5 - t60_at_freq) * 0.3).clamp(0.2, 0.95);
+
+        let noise_factor = if noise_db > 30.0 {
+            (1.0 - (noise_db - 30.0) / 80.0).max(0.2)
+        } else {
+            1.0
+        };
+        let sti_noisy = sti * noise_factor;
+
+        let bass_ratio = 1.2 - avg_absorption * 2.0;
+        let brilliance = 0.8 + avg_absorption;
+        let intimacy = if volume < 10000.0 { 0.9 } else if volume < 30000.0 { 0.7 } else { 0.5 };
+        let warmth = 0.5 + bass_ratio.clamp(0.5, 2.0) * 0.3;
+        let loudness = (1.0 - t60_at_freq / 5.0).clamp(0.0, 1.0);
+        let echo_strength = if building.geometry_type.contains("circular") { 0.9 } else { 0.4 };
+
+        SiteAcousticMetrics {
+            site_id: building.building_id.clone(),
+            site_name: building.name.clone(),
+            category: building.category.clone(),
+            dynasty: building.dynasty.clone(),
+            reverb_time_t60: t60_at_freq,
+            reverb_time_edt: t60_at_freq * 0.8,
+            clarity_c50: c50.clamp(-5.0, 20.0),
+            definition_d50: d50.clamp(10.0, 90.0),
+            sti_value: sti_noisy,
+            rasti_value: sti_noisy * 1.05,
+            sound_pressure_level: 70.0 + loudness * 20.0,
+            center_time: t60_at_freq * 0.3,
+            bass_ratio: bass_ratio.clamp(0.5, 2.0),
+            brilliance: brilliance.clamp(0.0, 1.0),
+            intimacy: intimacy.clamp(0.0, 1.0),
+            warmth: warmth.clamp(0.0, 1.0),
+            loudness,
+            echo_strength: echo_strength.clamp(0.0, 1.0),
+            description: building.description.clone(),
         }
     }
 }

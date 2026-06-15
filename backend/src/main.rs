@@ -123,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
     let sim_task = SimulatorTask::new(acoustic_config.clone(), sim_rx);
     tokio::spawn(async move { sim_task.run().await });
 
-    let analyzer_task = AnalyzerTask::new((*sti_config).clone(), analyzer_rx, alarm_tx.clone());
+    let analyzer_task = AnalyzerTask::new((*sti_config).clone(), acoustic_config.clone(), analyzer_rx, alarm_tx.clone());
     tokio::spawn(async move { analyzer_task.run().await });
 
     let dtu_receiver = Arc::new(DtuReceiver::new(

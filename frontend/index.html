@@ -163,6 +163,194 @@
         }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
         .status-dot.disconnected { background: #ff4444; box-shadow: 0 0 10px #ff4444; }
+
+        .tab-bar {
+            display: flex; gap: 4px; margin-bottom: 12px;
+            background: rgba(0,0,0,0.3); border-radius: 8px; padding: 4px;
+        }
+        .tab-btn {
+            flex: 1; padding: 8px 4px; font-size: 11px;
+            background: transparent; border: none;
+            color: #a08050; cursor: pointer;
+            border-radius: 6px; transition: all 0.3s;
+        }
+        .tab-btn:hover { color: #d4af37; }
+        .tab-btn.active {
+            background: linear-gradient(135deg, #d4af37, #8b6914);
+            color: #fff; font-weight: bold;
+        }
+
+        .tab-content { display: none; }
+        .tab-content.active { display: block; animation: fadeIn 0.3s; }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .result-card {
+            background: rgba(20, 30, 50, 0.6);
+            border: 1px solid rgba(212, 175, 55, 0.3);
+            border-radius: 8px; padding: 12px; margin-top: 10px;
+        }
+        .result-card h3 {
+            color: #d4af37; font-size: 14px; margin-bottom: 10px;
+            padding-bottom: 6px; border-bottom: 1px solid rgba(212, 175, 55, 0.3);
+        }
+        .result-card h4 {
+            color: #c0a878; font-size: 13px; margin: 10px 0 8px;
+        }
+        .result-grid {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px;
+        }
+        .result-item {
+            background: rgba(0,0,0,0.3); padding: 8px; border-radius: 5px;
+            text-align: center;
+        }
+        .result-item .label {
+            display: block; font-size: 10px; color: #a08050; margin-bottom: 4px;
+        }
+        .result-item .value {
+            font-size: 15px; color: #d4af37; font-weight: bold; font-family: monospace;
+        }
+        .result-item .value.warning { color: #ffaa00; }
+        .result-item .value.danger { color: #ff6666; }
+        .result-item .value.success { color: #66ff66; }
+
+        .sti-section { margin-top: 8px; }
+        .sti-row {
+            display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+        }
+        .sti-label { font-size: 11px; color: #a08050; width: 70px; flex-shrink: 0; }
+        .sti-bar-container {
+            flex: 1; height: 18px; background: rgba(0,0,0,0.4);
+            border-radius: 9px; position: relative; overflow: hidden;
+        }
+        .sti-bar {
+            height: 100%; border-radius: 9px; transition: width 0.8s;
+        }
+        .sti-text {
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 10px; color: #fff; font-weight: bold;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+        }
+        .degradation {
+            text-align: right; font-size: 12px; color: #a08050; margin-top: 4px;
+        }
+        .degradation .danger { color: #ff6666; font-weight: bold; }
+
+        .position-preset-list {
+            display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px;
+        }
+        .position-preset {
+            padding: 4px 8px; font-size: 10px;
+            background: rgba(40, 50, 80, 0.8);
+            border: 1px solid #8b6914; border-radius: 4px;
+            color: #e8d4a8; cursor: pointer; transition: all 0.3s;
+        }
+        .position-preset:hover { background: #8b6914; color: #fff; }
+
+        .best-summary {
+            display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px;
+            margin-bottom: 12px;
+        }
+        .best-item {
+            background: rgba(212, 175, 55, 0.15);
+            padding: 8px 6px; border-radius: 6px; text-align: center;
+            border: 1px solid rgba(212, 175, 55, 0.3);
+        }
+        .best-label { font-size: 10px; color: #a08050; display: block; margin-bottom: 4px; }
+        .best-value { font-size: 11px; color: #d4af37; font-weight: bold; }
+
+        .comparison-table-container {
+            overflow-x: auto; margin-bottom: 10px;
+        }
+        .comparison-table {
+            width: 100%; border-collapse: collapse; font-size: 10px;
+        }
+        .comparison-table th,
+        .comparison-table td {
+            padding: 6px 4px; text-align: center;
+            border-bottom: 1px solid rgba(139, 105, 20, 0.3);
+        }
+        .comparison-table th {
+            background: rgba(139, 105, 20, 0.3); color: #d4af37; font-weight: bold;
+        }
+        .comparison-table td.metric-name {
+            text-align: left; color: #c0a878; font-weight: bold;
+        }
+        .comparison-table td.best-value {
+            color: #ffdd44; font-weight: bold;
+            background: rgba(255, 221, 68, 0.1);
+        }
+
+        .ranking-section { margin-top: 10px; }
+        .ranking-list { display: flex; flex-direction: column; gap: 4px; }
+        .ranking-item {
+            display: flex; align-items: center; gap: 8px;
+            padding: 6px 10px; background: rgba(0,0,0,0.3);
+            border-radius: 4px;
+        }
+        .rank-number {
+            width: 22px; height: 22px; border-radius: 50%;
+            background: linear-gradient(135deg, #d4af37, #8b6914);
+            color: #fff; font-size: 11px; font-weight: bold;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .rank-name { font-size: 12px; color: #e8d4a8; }
+
+        .noise-map-hint {
+            margin-top: 10px; padding: 8px;
+            background: rgba(40, 50, 20, 0.5);
+            border-left: 3px solid #8b6914;
+            border-radius: 4px; font-size: 11px; line-height: 1.5;
+            color: #c0a878;
+        }
+
+        .binaural-section { margin-top: 10px; }
+
+        .insights-card {
+            background: linear-gradient(135deg, rgba(20, 30, 60, 0.8), rgba(40, 50, 80, 0.6));
+            border-color: rgba(212, 175, 55, 0.5);
+        }
+        .insights-grid {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+        }
+        .insight-item {
+            background: rgba(0,0,0,0.3); padding: 10px; border-radius: 6px;
+        }
+        .insight-item.full-width { grid-column: 1 / -1; }
+        .insight-item h4 {
+            color: #d4af37; font-size: 12px; margin: 0 0 8px 0;
+            padding-bottom: 4px; border-bottom: 1px solid rgba(212, 175, 55, 0.2);
+        }
+        .insight-item ul {
+            list-style: none; padding: 0; margin: 0;
+            font-size: 11px; line-height: 1.8; color: #c0a878;
+        }
+        .insight-item li::before {
+            content: "▸ "; color: #8b6914;
+        }
+        .insight-item p {
+            font-size: 11px; line-height: 1.7; color: #c0a878;
+            margin: 0;
+        }
+        .insight-item strong { color: #d4af37; }
+
+        .loading {
+            text-align: center; padding: 20px; color: #a08050;
+            font-size: 13px;
+        }
+        .loading::before {
+            content: "⏳"; margin-right: 6px;
+        }
+        .error {
+            color: #ff6666; padding: 10px;
+            background: rgba(100, 20, 20, 0.3);
+            border-radius: 6px; font-size: 12px;
+            text-align: center;
+        }
     </style>
 </head>
 <body>
@@ -196,10 +384,18 @@
         <div class="sidebar">
             <div class="header">
                 <h1>天坛声学仿真系统</h1>
-                <p>回音壁 · 三音石 · 圜丘坛</p>
+                <p>回音壁 · 三音石 · 圜丘坛 · 跨朝代对比</p>
             </div>
 
-            <div class="section">
+            <div class="tab-bar">
+                <button class="tab-btn active" data-tab="monitor" onclick="switchTab('monitor')">🏯 监测</button>
+                <button class="tab-btn" data-tab="dynasty" onclick="switchTab('dynasty')">🏛️ 朝代对比</button>
+                <button class="tab-btn" data-tab="modern" onclick="switchTab('modern')">🎻 古今对比</button>
+                <button class="tab-btn" data-tab="noise" onclick="switchTab('noise')">🔊 噪声模拟</button>
+                <button class="tab-btn" data-tab="experience" onclick="switchTab('experience')">🎧 虚拟体验</button>
+            </div>
+
+            <div class="tab-content active" id="tab-monitor">
                 <div class="section-title">监测场所</div>
                 <div class="site-selector">
                     <button class="site-btn active" data-site="huiyinbi" onclick="selectSite('huiyinbi')">回音壁</button>
@@ -300,6 +496,251 @@
                     <div style="color: #808070; font-size: 11px; text-align: center; padding: 10px;">暂无告警信息</div>
                 </div>
             </div>
+            </div>
+
+            <div class="tab-content" id="tab-dynasty">
+                <div class="section">
+                    <div class="section-title">朝代建筑声学对比</div>
+                    <p style="font-size: 12px; color: #a08050; margin-bottom: 12px; line-height: 1.6;">
+                        对比唐、宋、明、清四代祭祀建筑的声学设计差异。
+                    </p>
+                    <div id="dynasty-building-list" style="margin-bottom: 12px;">
+                        <div class="loading">加载建筑列表...</div>
+                    </div>
+                    <button class="action-btn" onclick="FeaturePanels.runDynastyComparison()">📊 开始朝代对比分析</button>
+                </div>
+
+                <div class="section" id="dynasty-result-section" style="display: none;">
+                    <div class="section-title">对比分析结果</div>
+                    <div class="best-summary" id="dynasty-best-summary"></div>
+                    <div class="comparison-table-container">
+                        <table class="comparison-table" id="dynasty-comparison-table">
+                            <thead></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                    <div class="ranking-section">
+                        <h4 style="font-size: 12px; color: #d4af37; margin-bottom: 8px;">综合排名</h4>
+                        <div class="ranking-list" id="dynasty-ranking"></div>
+                    </div>
+                </div>
+
+                <div class="section">
+                    <div class="section-title">朝代声学洞察</div>
+                    <div class="insights-grid">
+                        <div class="insight-item">
+                            <h4>唐代</h4>
+                            <p>宏大的明堂尺度，斗拱粗壮，长混响营造神圣感。</p>
+                        </div>
+                        <div class="insight-item">
+                            <h4>宋代</h4>
+                            <p>建筑比例趋于精巧，声学更加均衡。</p>
+                        </div>
+                        <div class="insight-item">
+                            <h4>明代</h4>
+                            <p>天坛回音壁的杰出代表，弧形墙精确聚焦声波。</p>
+                        </div>
+                        <div class="insight-item">
+                            <h4>清代</h4>
+                            <p>金砖墁地、藻井装饰，高频扩散更丰富。</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-content" id="tab-modern">
+                <div class="section">
+                    <div class="section-title">古代殿堂 vs 现代音乐厅</div>
+                    <p style="font-size: 12px; color: #a08050; margin-bottom: 12px; line-height: 1.6;">
+                        跨越时空的声学对话：比较古代祭祀建筑与现代音乐厅的设计哲学。
+                    </p>
+                    <div id="modern-hall-list" style="margin-bottom: 12px;">
+                        <div class="loading">加载音乐厅列表...</div>
+                    </div>
+                    <button class="action-btn" onclick="FeaturePanels.runModernComparison()">🎵 开始古今对比分析</button>
+                </div>
+
+                <div class="section" id="modern-result-section" style="display: none;">
+                    <div class="section-title">对比分析结果</div>
+                    <div class="best-summary" id="modern-best-summary"></div>
+                    <div class="comparison-table-container">
+                        <table class="comparison-table" id="modern-comparison-table">
+                            <thead></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                    <div class="ranking-section">
+                        <h4 style="font-size: 12px; color: #d4af37; margin-bottom: 8px;">综合排名</h4>
+                        <div class="ranking-list" id="modern-ranking"></div>
+                    </div>
+                </div>
+
+                <div class="section">
+                    <div class="section-title">古今声学洞察</div>
+                    <div class="insights-grid">
+                        <div class="insight-item">
+                            <h4>设计目标</h4>
+                            <p>古代追求<strong>神圣感与仪式感</strong>，现代追求<strong>音乐清晰度与空间感</strong>。</p>
+                        </div>
+                        <div class="insight-item">
+                            <h4>T60对比</h4>
+                            <p>古代殿堂T60普遍<strong>2-4秒</strong>，现代音乐厅<strong>1.8-2.2秒</strong>。</p>
+                        </div>
+                        <div class="insight-item full-width">
+                            <h4>共同智慧</h4>
+                            <p>无论古今，优秀的声学设计都遵循相似的物理规律：利用反射面增强声能分布、控制混响时间平衡清晰度与丰满度、关注扩散体消除声学缺陷。古代工匠通过经验积累达到了令人惊叹的声学成就。</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-content" id="tab-noise">
+                <div class="section">
+                    <div class="section-title">游客噪声模拟</div>
+                    <p style="font-size: 12px; color: #a08050; margin-bottom: 12px; line-height: 1.6;">
+                        模拟不同游客数量和分布对回音壁声学效果的影响。
+                    </p>
+                    <div class="control-row">
+                        <label>游客数量</label>
+                        <input type="range" id="noise-visitor-count" min="10" max="500" value="100" step="10">
+                        <span class="value" id="noise-visitor-value">100</span>
+                    </div>
+                    <div class="control-row">
+                        <label>单声源级</label>
+                        <input type="range" id="noise-source-level" min="40" max="90" value="60" step="1">
+                        <span class="value" id="noise-level-value">60</span>
+                    </div>
+                    <div class="control-row">
+                        <label>分布模式</label>
+                        <select id="noise-distribution" style="flex: 1; padding: 6px; background: rgba(40, 50, 80, 0.8); border: 1px solid #8b6914; border-radius: 4px; color: #e8d4a8; font-size: 12px;">
+                            <option value="uniform">均匀分布</option>
+                            <option value="cluster">聚集分布</option>
+                            <option value="ring">环形分布</option>
+                        </select>
+                    </div>
+                    <button class="action-btn" onclick="FeaturePanels.runNoiseSimulation()">🔊 运行噪声模拟</button>
+                </div>
+
+                <div class="section" id="noise-result-section" style="display: none;">
+                    <div class="section-title">噪声模拟结果</div>
+                    <div class="result-grid">
+                        <div class="result-item">
+                            <span class="label">等效噪声级</span>
+                            <span class="value warning" id="noise-leq">--</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="label">信噪比</span>
+                            <span class="value" id="noise-snr">--</span>
+                        </div>
+                    </div>
+                    <div class="sti-section">
+                        <div class="sti-row">
+                            <span class="sti-label">清净STI</span>
+                            <div class="sti-bar-container">
+                                <div class="sti-bar" id="noise-clean-sti-bar" style="width: 0%; background: linear-gradient(90deg, #444, #44ff44);"></div>
+                                <span class="sti-text" id="noise-clean-sti-text">--</span>
+                            </div>
+                        </div>
+                        <div class="sti-row">
+                            <span class="sti-label">噪声STI</span>
+                            <div class="sti-bar-container">
+                                <div class="sti-bar" id="noise-noisy-sti-bar" style="width: 0%; background: linear-gradient(90deg, #444, #ff4444);"></div>
+                                <span class="sti-text" id="noise-noisy-sti-text">--</span>
+                            </div>
+                        </div>
+                        <div class="degradation">
+                            STI下降: <span class="danger" id="noise-sti-degradation">--</span>
+                        </div>
+                    </div>
+                    <div class="noise-map-hint">
+                        💡 在3D视图中可查看噪声分布云图。红色表示高噪声区域，蓝色表示相对安静区域。
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-content" id="tab-experience">
+                <div class="section">
+                    <div class="section-title">虚拟回音体验</div>
+                    <p style="font-size: 12px; color: #a08050; margin-bottom: 12px; line-height: 1.6;">
+                        站在不同位置说话，亲身体验回音壁的神奇声学效果。
+                    </p>
+                    <div class="control-row">
+                        <label>体验场所</label>
+                        <select id="experience-site" style="flex: 1; padding: 6px; background: rgba(40, 50, 80, 0.8); border: 1px solid #8b6914; border-radius: 4px; color: #e8d4a8; font-size: 12px;">
+                            <option value="huiyinbi">回音壁</option>
+                            <option value="sanyinshi">三音石</option>
+                            <option value="huanqiutan">圜丘坛</option>
+                        </select>
+                    </div>
+                    <div class="control-row">
+                        <label>说话位置</label>
+                        <select id="experience-source-pos" style="flex: 1; padding: 6px; background: rgba(40, 50, 80, 0.8); border: 1px solid #8b6914; border-radius: 4px; color: #e8d4a8; font-size: 12px;">
+                            <option value="east">东侧</option>
+                            <option value="west">西侧</option>
+                            <option value="north">北侧</option>
+                            <option value="south">南侧</option>
+                            <option value="center">中心</option>
+                        </select>
+                    </div>
+                    <div class="control-row">
+                        <label>收听位置</label>
+                        <select id="experience-listener-pos" style="flex: 1; padding: 6px; background: rgba(40, 50, 80, 0.8); border: 1px solid #8b6914; border-radius: 4px; color: #e8d4a8; font-size: 12px;">
+                            <option value="east">东侧</option>
+                            <option value="west">西侧</option>
+                            <option value="north">北侧</option>
+                            <option value="south">南侧</option>
+                            <option value="center">中心</option>
+                        </select>
+                    </div>
+                    <button class="action-btn" onclick="FeaturePanels.runVirtualExperience()">🎧 开始虚拟体验</button>
+                </div>
+
+                <div class="section" id="experience-result-section" style="display: none;">
+                    <div class="section-title">体验结果</div>
+                    <div class="result-grid">
+                        <div class="result-item">
+                            <span class="label">直达声声级</span>
+                            <span class="value" id="exp-direct-spl">--</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="label">反射声声级</span>
+                            <span class="value" id="exp-reflect-spl">--</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="label">混响时间</span>
+                            <span class="value" id="exp-t60">--</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="label">STI</span>
+                            <span class="value" id="exp-sti">--</span>
+                        </div>
+                    </div>
+
+                    <div class="binaural-section">
+                        <h4 style="font-size: 12px; color: #d4af37; margin-bottom: 8px;">双耳听觉参数</h4>
+                        <div class="result-grid">
+                            <div class="result-item">
+                                <span class="label">耳间时间差 ITD</span>
+                                <span class="value" id="exp-itd">--</span>
+                            </div>
+                            <div class="result-item">
+                                <span class="label">耳间强度差 ILD</span>
+                                <span class="value" id="exp-ild">--</span>
+                            </div>
+                        </div>
+                        <p style="font-size: 11px; color: #a08050; margin-top: 8px; line-height: 1.6;">
+                            💡 双耳差异让您能感知声音的方向。戴上立体声耳机效果更佳！
+                        </p>
+                    </div>
+
+                    <div class="section" style="margin-top: 12px; padding: 10px; background: rgba(20, 30, 60, 0.6);">
+                        <h4 style="font-size: 12px; color: #d4af37; margin-bottom: 6px;">🎤 语音提示</h4>
+                        <p style="font-size: 11px; color: #c0a878; line-height: 1.6;" id="exp-description">
+                            --
+                        </p>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -307,6 +748,8 @@
     <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
     <script src="js/temple_of_heaven_3d.js"></script>
     <script src="js/acoustic_panel.js"></script>
+    <script src="js/buildings_3d.js"></script>
+    <script src="js/feature_panels.js"></script>
     <script>
         function selectSite(site) {
             TempleOfHeaven3D.selectSite(site);
@@ -322,10 +765,51 @@
                 TempleOfHeaven3D.isParticleRunning() ? '⏸ 暂停粒子动画' : '▶ 继续粒子动画';
         }
 
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.tab === tabId);
+            });
+            document.querySelectorAll('.tab-content').forEach(c => {
+                c.classList.toggle('active', c.id === 'tab-' + tabId);
+            });
+            if (tabId === 'dynasty') {
+                FeaturePanels.loadAncientBuildings();
+                Buildings3D.showDynastyBuildings();
+            } else if (tabId === 'modern') {
+                FeaturePanels.loadConcertHalls();
+                Buildings3D.showConcertHalls();
+            } else if (tabId === 'noise') {
+                Buildings3D.showTempleOnly();
+            } else if (tabId === 'experience') {
+                Buildings3D.showTempleOnly();
+            } else {
+                Buildings3D.showTempleOnly();
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const noiseCountSlider = document.getElementById('noise-visitor-count');
+            const noiseCountValue = document.getElementById('noise-visitor-value');
+            if (noiseCountSlider && noiseCountValue) {
+                noiseCountSlider.addEventListener('input', () => {
+                    noiseCountValue.textContent = noiseCountSlider.value;
+                });
+            }
+            const noiseLevelSlider = document.getElementById('noise-source-level');
+            const noiseLevelValue = document.getElementById('noise-level-value');
+            if (noiseLevelSlider && noiseLevelValue) {
+                noiseLevelSlider.addEventListener('input', () => {
+                    noiseLevelValue.textContent = noiseLevelSlider.value + ' dB';
+                });
+            }
+        });
+
         window.addEventListener('load', () => {
             TempleOfHeaven3D.init('three-canvas');
             TempleOfHeaven3D.initSoundField();
             AcousticPanel.init();
+            Buildings3D.init(TempleOfHeaven3D.scene, TempleOfHeaven3D.camera);
+            FeaturePanels.init();
             window.addEventListener('resize', TempleOfHeaven3D.resizeRenderer);
         });
     </script>

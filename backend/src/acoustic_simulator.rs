@@ -385,6 +385,14 @@ impl SimulatorTask {
                     let result = self.handle_wave_field(&params);
                     let _ = reply.send(result);
                 }
+                SimulatorRequest::VirtualExperience { params, reply } => {
+                    let result = self.handle_virtual_experience(&params);
+                    let _ = reply.send(result);
+                }
+                SimulatorRequest::NoiseSimulation { params, reply } => {
+                    let result = self.handle_noise_simulation(&params);
+                    let _ = reply.send(result);
+                }
             }
         }
     }
@@ -425,5 +433,354 @@ impl SimulatorTask {
             self.config.simulation_defaults.air_absorption_coefficient,
             self.config.simulation_defaults.diffraction_threshold,
         ))
+    }
+
+    fn create_building_simulator(&self, building_id: &str) -> Option<BuildingAcousticSimulator> {
+        let building = self.config.ancient_buildings.get(building_id)
+            .or_else(|| self.config.concert_halls.get(building_id))?;
+        Some(BuildingAcousticSimulator::new(
+            building.clone(),
+            self.config.simulation_defaults.speed_of_sound,
+            self.config.simulation_defaults.air_absorption_coefficient,
+        ))
+    }
+
+    fn handle_virtual_experience(&self, params: &crate::models::VirtualExperienceRequest) -> crate::models::VirtualExperienceResult {
+        use crate::models::{BinauralImpulseResponse, Vec3};
+
+        let sim = self.create_simulator(&params.site_id)
+            .or_else(|| {
+                let _building = self.config.ancient_buildings.get(&params.site_id)
+                    .or_else(|| self.config.concert_halls.get(&params.site_id));
+                None
+            });
+
+        let sim_params = crate::models::SimulationParams {
+            site_id: params.site_id.clone(),
+            source_position: params.source_position.clone(),
+            frequency: params.frequency,
+            max_reflections: 12,
+            num_rays: 200,
+            temperature: 20.0,
+            humidity: 50.0,
+        };
+
+        let paths = if let Some(sim) = &sim {
+            sim.trace_ray_geometric(&sim_params)
+        } else {
+            Vec::new()
+        };
+
+        let src = params.source_position.to_point3();
+        let listener = params.listener_position.to_point3();
+        let direct_dist = (listener - src).norm();
+
+        let direct_path = crate::models::SoundPath {
+            timestamp: chrono::Utc::now(),
+            path_id: uuid::Uuid::new_v4(),
+            site_id: params.site_id.clone(),
+            source_position: params.source_position.clone(),
+            receiver_position: params.listener_position.clone(),
+            reflection_count: 0,
+            path_points: vec![params.source_position.clone(), params.listener_position.clone()],
+            travel_distance: direct_dist,
+            travel_time: direct_dist / 343.0,
+            attenuation_db: 20.0 * (direct_dist / 1.0).log10().max(0.0),
+            frequency: params.frequency,
+        };
+
+        let reflection_paths: Vec<crate::models::SoundPath> = paths.iter()
+            .filter(|p| p.reflection_count >= 1)
+            .cloned()
+            .collect();
+
+        let total_paths = paths.clone();
+
+        let ir = if let Some(sim) = &sim {
+            sim.generate_impulse_response(&sim_params, 2.0, 44100)
+        } else {
+            vec![0.0; 88200]
+        };
+
+        let (t60, _, _) = AcousticSimulator::compute_reverb_from_ir(&ir, 44100);
+
+        let binaural_ir = Self::compute_binaural_ir(
+            &params.source_position,
+            &params.listener_position,
+            &ir,
+            44100,
+        );
+
+        let echo_count = reflection_paths.len().min(10) as u32;
+        let mut sorted_reflections = reflection_paths.clone();
+        sorted_reflections.sort_by(|a, b| a.travel_time.partial_cmp(&b.travel_time).unwrap());
+
+        let echo_delay_1 = sorted_reflections.get(0).map(|p| p.travel_time).unwrap_or(0.0);
+        let echo_delay_2 = sorted_reflections.get(1).map(|p| p.travel_time).unwrap_or(0.0);
+        let echo_delay_3 = sorted_reflections.get(2).map(|p| p.travel_time).unwrap_or(0.0);
+
+        let base_sti = match params.site_id.as_str() {
+            "huiyinbi" => 0.72,
+            "sanyinshi" => 0.65,
+            "huanqiutan" => 0.68,
+            _ => 0.60,
+        };
+
+        let noise_reduction = if params.include_noise {
+            0.15
+        } else {
+            0.0
+        };
+
+        let sti_without_noise = base_sti;
+        let sti_with_noise = (base_sti - noise_reduction).max(0.0);
+
+        let speech_intelligibility = crate::models::SpeechIntelligibility {
+            timestamp: chrono::Utc::now(),
+            analysis_id: uuid::Uuid::new_v4(),
+            site_id: params.site_id.clone(),
+            site_name: match params.site_id.as_str() {
+                "huiyinbi" => "回音壁".to_string(),
+                "sanyinshi" => "三音石".to_string(),
+                "huanqiutan" => "圜丘坛".to_string(),
+                id => id.to_string(),
+            },
+            sti_value: sti_with_noise,
+            rasti_value: sti_with_noise * 1.05,
+            crispness: 5.0,
+            definition_d50: 50.0 + (sti_with_noise - 0.5) * 100.0,
+            clarity_c50: 3.0 + (sti_with_noise - 0.5) * 30.0,
+            center_time: 0.05,
+            frequency_bands: vec![125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0],
+            band_snr: vec![15.0, 18.0, 22.0, 20.0, 18.0, 15.0, 12.0],
+            speech_content: params.speech_text.clone(),
+        };
+
+        let sound_preservation_score = if params.site_id == "huiyinbi" {
+            0.92
+        } else if params.site_id == "sanyinshi" {
+            0.85
+        } else {
+            0.78
+        };
+
+        crate::models::VirtualExperienceResult {
+            site_id: params.site_id.clone(),
+            source_position: params.source_position.clone(),
+            listener_position: params.listener_position.clone(),
+            direct_path,
+            reflection_paths,
+            total_paths,
+            impulse_response: ir,
+            binaural_ir,
+            sti_with_noise,
+            sti_without_noise,
+            speech_intelligibility,
+            echo_count,
+            echo_delay_1,
+            echo_delay_2,
+            echo_delay_3,
+            reverberation_time_t60: t60,
+            sound_preservation_score,
+        }
+    }
+
+    fn compute_binaural_ir(
+        src_pos: &crate::models::Vec3,
+        listener_pos: &crate::models::Vec3,
+        mono_ir: &[f64],
+        sample_rate: u32,
+    ) -> crate::models::BinauralImpulseResponse {
+        use std::f64::consts::PI;
+        let head_radius = 0.0875;
+        let src = src_pos.to_point3();
+        let listener = listener_pos.to_point3();
+        let sound_direction = (src - listener).normalize();
+        let azimuth = sound_direction.x.atan2(sound_direction.z);
+
+        let left_ear_dist = head_radius * (PI - azimuth).cos().max(0.0);
+        let right_ear_dist = head_radius * (PI + azimuth).cos().max(0.0);
+
+        let itd = (left_ear_dist - right_ear_dist) / 343.0;
+        let ild = 6.0 * azimuth.cos().abs();
+
+        let delay_samples = (itd.abs() * sample_rate as f64) as usize;
+        let mut left_ir = Vec::with_capacity(mono_ir.len());
+        let mut right_ir = Vec::with_capacity(mono_ir.len());
+
+        if itd > 0.0 {
+            for i in 0..mono_ir.len() {
+                left_ir.push(if i < delay_samples { 0.0 } else { mono_ir[i - delay_samples] });
+                right_ir.push(mono_ir[i] * 10.0_f64.powf(-ild / 20.0));
+            }
+        } else {
+            for i in 0..mono_ir.len() {
+                right_ir.push(if i < delay_samples { 0.0 } else { mono_ir[i - delay_samples] });
+                left_ir.push(mono_ir[i] * 10.0_f64.powf(-ild / 20.0));
+            }
+        }
+
+        crate::models::BinauralImpulseResponse {
+            left_ear: left_ir,
+            right_ear: right_ir,
+            sample_rate,
+            listener_position: listener_pos.clone(),
+            source_position: src_pos.clone(),
+            itd_seconds: itd,
+            ild_db: ild,
+        }
+    }
+
+    fn handle_noise_simulation(&self, params: &crate::models::NoiseSimulationRequest) -> crate::models::NoiseSimulationResult {
+        use std::collections::HashMap;
+
+        let grid_res = 32u16;
+        let mut noise_map = vec![vec![0.0f64; grid_res as usize]; grid_res as usize];
+
+        let mut total_noise_energy = 0.0f64;
+        let mut noise_contribution = HashMap::new();
+
+        for (i, noise_src) in params.noise_sources.iter().enumerate() {
+            let noise_power = 10.0_f64.powf(noise_src.sound_level_db / 10.0);
+            total_noise_energy += noise_power;
+            noise_contribution.insert(
+                format!("noise_{}", i),
+                noise_src.sound_level_db,
+            );
+        }
+
+        let listener = params.listener_position.to_point3();
+        let mut total_energy_at_listener = 0.0f64;
+        for noise_src in &params.noise_sources {
+            let src = noise_src.position.to_point3();
+            let dist = (listener - src).norm().max(1.0);
+            let level_at_listener = noise_src.sound_level_db - 20.0 * (dist / 1.0).log10();
+            total_energy_at_listener += 10.0_f64.powf(level_at_listener / 10.0);
+        }
+
+        let total_noise_level_db = 10.0 * total_energy_at_listener.log10();
+        let snr_db = params.speech_level_db - total_noise_level_db;
+
+        let clean_sti = 0.75;
+        let snr_factor = (snr_db / 20.0).tanh();
+        let noisy_sti = 0.2 + (clean_sti - 0.2) * snr_factor.max(0.0);
+        let sti_degradation = clean_sti - noisy_sti;
+
+        let site_area = 3.14159 * 30.75 * 30.75;
+        let noise_per_person = 55.0;
+        let crowd_density = 0.3;
+        let max_visitors = ((site_area * crowd_density) as u32).min(500);
+
+        let grid_scale = 61.5 / grid_res as f64;
+        for i in 0..grid_res as usize {
+            for j in 0..grid_res as usize {
+                let px = -30.75 + i as f64 * grid_scale;
+                let pz = -30.75 + j as f64 * grid_scale;
+
+                let mut point_energy = 0.0f64;
+                for noise_src in &params.noise_sources {
+                    let dx = px - noise_src.position.x;
+                    let dz = pz - noise_src.position.z;
+                    let dist = (dx * dx + dz * dz).sqrt().max(0.5);
+                    let level = noise_src.sound_level_db - 20.0 * (dist / 1.0).log10();
+                    point_energy += 10.0_f64.powf(level / 10.0);
+                }
+
+                noise_map[i][j] = if point_energy > 0.0 {
+                    10.0 * point_energy.log10()
+                } else {
+                    0.0
+                };
+            }
+        }
+
+        let min_val = noise_map.iter().flatten().cloned().fold(f64::INFINITY, f64::min);
+        let max_val = noise_map.iter().flatten().cloned().fold(f64::NEG_INFINITY, f64::max);
+        if max_val > min_val {
+            for row in noise_map.iter_mut() {
+                for v in row.iter_mut() {
+                    *v = (*v - min_val) / (max_val - min_val);
+                }
+            }
+        }
+
+        crate::models::NoiseSimulationResult {
+            site_id: params.site_id.clone(),
+            total_noise_level_db,
+            speech_level_db: params.speech_level_db,
+            snr_db,
+            sti_clean: clean_sti,
+            sti_noisy: noisy_sti.max(0.0),
+            sti_degradation: sti_degradation.max(0.0),
+            noise_contribution,
+            recommended_max_visitors: max_visitors,
+            crowd_noise_map: noise_map,
+            grid_resolution: grid_res,
+        }
+    }
+}
+
+pub struct BuildingAcousticSimulator {
+    building: crate::models::BuildingMeta,
+    speed_of_sound: f64,
+    air_absorption_coeff: f64,
+}
+
+impl BuildingAcousticSimulator {
+    pub fn new(building: crate::models::BuildingMeta, speed_of_sound: f64, air_absorption_coeff: f64) -> Self {
+        Self {
+            building,
+            speed_of_sound,
+            air_absorption_coeff,
+        }
+    }
+
+    pub fn compute_acoustic_metrics(&self) -> crate::models::SiteAcousticMetrics {
+        let b = &self.building;
+        let volume = b.volume_cubic_meters;
+        let surface_area = 2.0 * (b.dimensions.x * b.dimensions.z + b.dimensions.x * b.dimensions.y + b.dimensions.z * b.dimensions.y);
+        let avg_absorption = (b.wall_absorption + b.ceiling_absorption + b.floor_absorption) / 3.0;
+
+        let t60 = if avg_absorption > 0.001 {
+            0.161 * volume / (surface_area * avg_absorption)
+        } else {
+            b.typical_reverb_t60
+        };
+
+        let t60 = t60.max(0.5).min(5.0);
+
+        let bass_ratio = 1.2 - avg_absorption * 2.0;
+        let brilliance = 0.8 + avg_absorption;
+        let intimacy = if volume < 10000.0 { 0.9 } else if volume < 30000.0 { 0.7 } else { 0.5 };
+        let warmth = 0.5 + bass_ratio * 0.3;
+        let loudness = 1.0 - t60 / 5.0;
+        let echo_strength = if b.geometry_type.contains("circular") { 0.9 } else { 0.5 };
+
+        let c50 = 3.0 + (1.5 - t60) * 5.0;
+        let d50 = 50.0 + (1.5 - t60) * 20.0;
+        let sti = 0.4 + (1.5 - t60) * 0.3;
+        let sti = sti.clamp(0.2, 0.95);
+
+        crate::models::SiteAcousticMetrics {
+            site_id: b.building_id.clone(),
+            site_name: b.name.clone(),
+            category: b.category.clone(),
+            dynasty: b.dynasty.clone(),
+            reverb_time_t60: t60,
+            reverb_time_edt: t60 * 0.8,
+            clarity_c50: c50.clamp(-5.0, 20.0),
+            definition_d50: d50.clamp(10.0, 90.0),
+            sti_value: sti,
+            rasti_value: sti * 1.05,
+            sound_pressure_level: 70.0 + loudness * 20.0,
+            center_time: t60 * 0.3,
+            bass_ratio: bass_ratio.clamp(0.5, 2.0),
+            brilliance: brilliance.clamp(0.0, 1.0),
+            intimacy: intimacy.clamp(0.0, 1.0),
+            warmth: warmth.clamp(0.0, 1.0),
+            loudness: loudness.clamp(0.0, 1.0),
+            echo_strength: echo_strength.clamp(0.0, 1.0),
+            description: b.description.clone(),
+        }
     }
 }

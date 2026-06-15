@@ -484,5 +484,315 @@ def main():
         sim.close()
 
 
+ANCIENT_BUILDINGS = {
+    "tang_temple": {
+        "name": "唐代明堂",
+        "dynasty": "唐",
+        "volume": 180000.0,
+        "base_t60": 2.8,
+        "base_spl": 72.0,
+        "base_sti": 0.55,
+        "wall_absorption": 0.08,
+        "description": "唐代礼制建筑，规模宏大",
+    },
+    "song_temple": {
+        "name": "宋代大庆殿",
+        "dynasty": "宋",
+        "volume": 24000.0,
+        "base_t60": 2.0,
+        "base_spl": 75.0,
+        "base_sti": 0.62,
+        "wall_absorption": 0.10,
+        "description": "宋代宫殿正殿",
+    },
+    "ming_temple": {
+        "name": "明代奉天殿",
+        "dynasty": "明",
+        "volume": 56700.0,
+        "base_t60": 3.2,
+        "base_spl": 70.0,
+        "base_sti": 0.50,
+        "wall_absorption": 0.06,
+        "description": "明代故宫三大殿之首",
+    },
+    "qing_temple": {
+        "name": "清代太和殿",
+        "dynasty": "清",
+        "volume": 63700.0,
+        "base_t60": 3.0,
+        "base_spl": 71.0,
+        "base_sti": 0.52,
+        "wall_absorption": 0.07,
+        "description": "清代故宫三大殿之首",
+    },
+}
+
+MODERN_HALLS = {
+    "shoemaker_hall": {
+        "name": "鞋盒式音乐厅",
+        "style": "Shoebox",
+        "volume": 16200.0,
+        "base_t60": 1.8,
+        "base_spl": 80.0,
+        "base_sti": 0.68,
+        "wall_absorption": 0.15,
+        "description": "典型现代鞋盒式音乐厅",
+    },
+    "vineyard_hall": {
+        "name": "葡萄园式音乐厅",
+        "style": "Vineyard",
+        "volume": 15000.0,
+        "base_t60": 2.0,
+        "base_spl": 82.0,
+        "base_sti": 0.65,
+        "wall_absorption": 0.18,
+        "description": "葡萄园梯田式音乐厅",
+    },
+    "boston_hall": {
+        "name": "波士顿交响乐厅",
+        "style": "Classical",
+        "volume": 17100.0,
+        "base_t60": 1.9,
+        "base_spl": 81.0,
+        "base_sti": 0.67,
+        "wall_absorption": 0.08,
+        "description": "世界著名声学标杆",
+    },
+}
+
+
+class MultiBuildingSimulator:
+    """多建筑声学对比模拟器 - 模拟各朝代宫殿与现代音乐厅的声学特性"""
+
+    def __init__(self, api_url: str = "http://localhost:8080",
+                 mqtt_host: str = "localhost", mqtt_port: int = 1883,
+                 include_ancient: bool = True, include_modern: bool = True,
+                 noise_mode: bool = False, visitor_count: int = 100):
+        self.api_url = api_url.rstrip("/")
+        self.mqtt_host = mqtt_host
+        self.mqtt_port = mqtt_port
+        self.include_ancient = include_ancient
+        self.include_modern = include_modern
+        self.noise_mode = noise_mode
+        self.visitor_count = visitor_count
+
+        import paho.mqtt.client as mqtt
+        self.mqtt_client = mqtt.Client(client_id="multi-building-sim")
+        try:
+            self.mqtt_client.connect(mqtt_host, mqtt_port, 60)
+            self.mqtt_client.loop_start()
+        except Exception as e:
+            print(f"[WARN] MQTT连接失败: {e}")
+
+    def generate_building_measurement(self, building_id: str, building_info: dict,
+                                       frequency: float = 1000.0,
+                                       noise_level_db: float = 30.0) -> dict:
+        """生成单个建筑的声学测量数据"""
+        import math
+
+        base_t60 = building_info["base_t60"]
+        base_spl = building_info["base_spl"]
+        base_sti = building_info["base_sti"]
+
+        freq_factor = 1.0 / (frequency / 1000.0) ** 0.3
+        t60 = base_t60 * freq_factor * random.uniform(0.9, 1.1)
+        t30 = t60 * random.uniform(0.85, 0.95)
+        edt = t60 * random.uniform(0.75, 0.85)
+
+        spl = base_spl + random.gauss(0, 3)
+        air_atten = 0.005 * 10.0
+        spl -= air_atten
+
+        if self.noise_mode:
+            noise_factor = 1.0 - (noise_level_db - 30.0) / 80.0
+            noise_factor = max(0.2, min(1.0, noise_factor))
+            sti = base_sti * noise_factor + random.gauss(0, 0.03)
+        else:
+            sti = base_sti + random.gauss(0, 0.03)
+
+        sti = max(0.0, min(1.0, sti))
+        rasti = max(0.0, min(1.0, sti * random.uniform(1.02, 1.08)))
+
+        d50 = max(0, min(100, 45 + (sti - 0.5) * 120 + random.gauss(0, 5)))
+        c50 = max(-10, min(30, 2 + (sti - 0.5) * 45 + random.gauss(0, 2)))
+
+        ir_samples = 2048
+        ir = []
+        peak_idx = 50
+        for i in range(ir_samples):
+            t = (i - peak_idx) / 44100.0
+            if t < 0:
+                ir_val = 0.0
+            else:
+                decay = math.exp(-t * 6.9078 / base_t60)
+                noise = random.gauss(0, 0.02)
+                ir_val = decay * (1.0 if i == peak_idx else 0.3 * random.random()) + noise
+            ir.append(ir_val)
+
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "measurement_id": str(uuid.uuid4()),
+            "site_id": building_id,
+            "site_name": building_info["name"],
+            "sensor_id": f"{building_id.upper()}-S01",
+            "pulse_response": [round(v, 6) for v in ir],
+            "reverb_time_t60": round(t60, 3),
+            "reverb_time_t30": round(t30, 3),
+            "reverb_time_edt": round(edt, 3),
+            "sound_pressure_level": round(spl, 2),
+            "temperature": round(random.uniform(18, 26), 1),
+            "humidity": round(random.uniform(40, 65), 1),
+            "wind_speed": round(random.uniform(0, 3), 1),
+            "frequency": frequency,
+        }
+
+    def run_comparison_simulation(self) -> None:
+        """运行声学对比模拟：一次性生成所有建筑的测量数据"""
+        print("\n" + "=" * 60)
+        print("  多建筑声学对比模拟")
+        print("=" * 60)
+
+        all_buildings = {}
+        if self.include_ancient:
+            all_buildings.update(ANCIENT_BUILDINGS)
+        if self.include_modern:
+            all_buildings.update(MODERN_HALLS)
+
+        if not all_buildings:
+            print("没有选择任何建筑类型")
+            return
+
+        frequencies = [125, 250, 500, 1000, 2000, 4000, 8000]
+        noise_level = 55.0 if self.noise_mode else 30.0
+
+        print(f"\n模拟建筑数: {len(all_buildings)}")
+        print(f"频率数: {len(frequencies)}")
+        print(f"噪声模式: {'启用' if self.noise_mode else '禁用'}")
+        if self.noise_mode:
+            print(f"游客人数: {self.visitor_count} 人")
+
+        print("\n--- 声学测量 ---")
+        for bid, binf in all_buildings.items():
+            print(f"\n[{binf['name']}]")
+            for freq in frequencies:
+                m = self.generate_building_measurement(bid, binf, freq, noise_level)
+                try:
+                    resp = requests.post(
+                        f"{self.api_url}/api/measurements",
+                        json=m,
+                        timeout=5,
+                    )
+                    if resp.status_code == 200:
+                        print(f"  {freq:>5} Hz | T60={m['reverb_time_t60']:.2f}s | "
+                              f"SPL={m['sound_pressure_level']:.1f}dB")
+                    else:
+                        print(f"  {freq:>5} Hz | HTTP {resp.status_code}")
+                except Exception as e:
+                    print(f"  {freq:>5} Hz | ERR {e}")
+
+        print("\n--- 语音清晰度分析 ---")
+        for bid, binf in all_buildings.items():
+            base_sti = binf["base_sti"]
+            if self.noise_mode:
+                noise_factor = max(0.2, 1.0 - (noise_level - 30.0) / 80.0)
+                sti_val = base_sti * noise_factor
+            else:
+                sti_val = base_sti
+
+            sti_val = max(0.0, min(1.0, sti_val + random.gauss(0, 0.02)))
+            quality = ("优秀" if sti_val >= 0.85 else "良好" if sti_val >= 0.75
+                       else "中等" if sti_val >= 0.60 else "较差" if sti_val >= 0.45 else "差")
+
+            print(f"  {binf['name']:20s} | STI={sti_val:.3f} ({quality})")
+
+        if self.noise_mode:
+            print("\n--- 噪声影响分析 ---")
+            self._analyze_noise_impact(all_buildings)
+
+    def _analyze_noise_impact(self, buildings: dict) -> None:
+        """分析游客噪声对各建筑的影响"""
+        print(f"\n游客人数: {self.visitor_count} 人")
+        print(f"人均噪声级: 60 dB")
+        print("-" * 40)
+
+        for bid, binf in buildings.items():
+            base_sti = binf["base_sti"]
+            volume = binf["volume"]
+
+            noise_level = 40.0 + 10.0 * math.log10(max(1, self.visitor_count) * 1e-3 * 1000)
+            noise_level = min(noise_level, 90.0)
+
+            snr = 70.0 - noise_level
+            sti_reduction = max(0.05, 0.5 - snr / 50.0) if snr < 25 else 0.02
+            noisy_sti = max(0.0, base_sti - sti_reduction)
+
+            print(f"\n  {binf['name']}:")
+            print(f"    背景噪声: {noise_level:.1f} dB")
+            print(f"    信噪比: {snr:.1f} dB")
+            print(f"    安静STI: {base_sti:.3f}")
+            print(f"    噪声STI: {noisy_sti:.3f}")
+            print(f"    下降幅度: {(sti_reduction * 100):.1f}%")
+
+    def run_continuous(self, interval_sec: int = 120) -> None:
+        """连续运行多建筑对比模拟"""
+        print(f"开始多建筑连续模拟，每 {interval_sec} 秒一次")
+        print("按 Ctrl+C 停止")
+
+        try:
+            while True:
+                self.run_comparison_simulation()
+                time.sleep(interval_sec)
+        except KeyboardInterrupt:
+            print("\n模拟器已停止")
+
+    def close(self):
+        try:
+            self.mqtt_client.loop_stop()
+            self.mqtt_client.disconnect()
+        except Exception:
+            pass
+
+
+def main_multi_building():
+    """多建筑模拟入口函数"""
+    import argparse
+    parser = argparse.ArgumentParser(description="多建筑声学对比模拟器")
+    parser.add_argument("--api-url", default="http://localhost:8080", help="后端API地址")
+    parser.add_argument("--mqtt-host", default="localhost", help="MQTT broker地址")
+    parser.add_argument("--mqtt-port", type=int, default=1883, help="MQTT broker端口")
+    parser.add_argument("--ancient", action="store_true", default=True, help="包含古代建筑")
+    parser.add_argument("--modern", action="store_true", default=True, help="包含现代音乐厅")
+    parser.add_argument("--noise", action="store_true", help="启用游客噪声模拟")
+    parser.add_argument("--visitors", type=int, default=100, help="游客人数(噪声模式)")
+    parser.add_argument("--mode", choices=["once", "continuous"], default="once",
+                        help="运行模式")
+    parser.add_argument("--interval", type=int, default=120, help="连续模式间隔(秒)")
+
+    args = parser.parse_args()
+
+    sim = MultiBuildingSimulator(
+        api_url=args.api_url,
+        mqtt_host=args.mqtt_host,
+        mqtt_port=args.mqtt_port,
+        include_ancient=args.ancient,
+        include_modern=args.modern,
+        noise_mode=args.noise,
+        visitor_count=args.visitors,
+    )
+
+    try:
+        if args.mode == "once":
+            sim.run_comparison_simulation()
+        else:
+            sim.run_continuous(args.interval)
+    finally:
+        sim.close()
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+    if "--multi-building" in sys.argv:
+        sys.argv.remove("--multi-building")
+        main_multi_building()
+    else:
+        main()
