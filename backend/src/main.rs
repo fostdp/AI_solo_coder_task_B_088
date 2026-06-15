@@ -13,30 +13,56 @@ use crate::dtu_receiver::DtuReceiver;
 use crate::models::{AcousticConfig, StiWeightsConfig, AlarmEvent, SimulatorRequest, AnalyzerRequest};
 use crate::routes::{AppState, create_router};
 use crate::storage::ClickHouseStore;
+use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_util::layers::PrefixLayer;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
+use tower_http::trace::{TraceLayer, DefaultMakeSpan};
+use tracing::{info, warn, Level};
+use tracing_subscriber::{fmt, EnvFilter};
+
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,tower_http=debug"));
+    fmt()
+        .with_env_filter(filter)
+        .json()
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_file(true)
+        .with_line_number(true)
+        .init();
+}
+
+fn init_metrics() {
+    let recorder = PrometheusBuilder::new()
+        .set_buckets_for_prefix(
+            "tiantan",
+            vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],
+        )
+        .expect("failed to set histogram buckets")
+        .build_recorder();
+    let recorder = PrefixLayer::new("tiantan").layer(recorder);
+    metrics::set_boxed_recorder(Box::new(recorder))
+        .expect("failed to install metrics recorder");
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Failed to set tracing subscriber");
+    init_tracing();
+    init_metrics();
 
     info!("=====================================================");
     info!("  天坛回音壁声学仿真与语音清晰度分析系统 - Rust 后端");
     info!("=====================================================");
 
     let ch_url = std::env::var("CLICKHOUSE_URL")
-        .unwrap_or_else(|_| "http://localhost:8123".to_string());
+        .unwrap_or_else(|_| "http://clickhouse:8123".to_string());
     let ch_database = std::env::var("CLICKHOUSE_DATABASE")
         .unwrap_or_else(|_| "tiantan_acoustics".to_string());
     let mqtt_host = std::env::var("MQTT_HOST")
-        .unwrap_or_else(|_| "localhost".to_string());
+        .unwrap_or_else(|_| "mosquitto".to_string());
     let mqtt_port: u16 = std::env::var("MQTT_PORT")
         .unwrap_or_else(|_| "1883".to_string())
         .parse()
@@ -49,6 +75,10 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "8080".to_string())
         .parse()
         .unwrap_or(8080);
+    let metrics_port: u16 = std::env::var("METRICS_PORT")
+        .unwrap_or_else(|_| "9090".to_string())
+        .parse()
+        .unwrap_or(9090);
 
     let config_path = std::env::var("ACOUSTIC_CONFIG_PATH")
         .unwrap_or_else(|_| "config/acoustic_config.json".to_string());
@@ -116,26 +146,24 @@ async fn main() -> anyhow::Result<()> {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let app = create_router(app_state).layer(cors);
+    let trace_layer = TraceLayer::new_for_http()
+        .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO));
+
+    let app = create_router(app_state)
+        .layer(trace_layer)
+        .layer(cors);
+
+    let metrics_addr: SocketAddr = format!("0.0.0.0:{}", metrics_port).parse()?;
+    info!("Prometheus指标端点: http://{}/metrics", metrics_addr);
+    tokio::spawn(async move {
+        let metrics_app = routes::create_metrics_router();
+        let listener = tokio::net::TcpListener::bind(metrics_addr).await.unwrap();
+        axum::serve(listener, metrics_app).await.unwrap();
+    });
 
     let addr: SocketAddr = format!("{}:{}", listen_host, listen_port).parse()?;
     info!("HTTP服务监听: http://{}", addr);
     info!("模块拓扑: dtu_receiver → alarm_mqtt, acoustic_simulator (RPC), clarity_analyzer (RPC) → alarm_mqtt");
-    info!("可用API端点:");
-    info!("  GET  /api/health                - 健康检查");
-    info!("  GET  /api/sites                 - 获取场所列表");
-    info!("  GET  /api/sensors               - 获取传感器列表");
-    info!("  GET  /api/measurements          - 获取声学测量数据");
-    info!("  POST /api/measurements          - 上报声学测量数据");
-    info!("  GET  /api/sound-paths           - 获取声传播路径");
-    info!("  GET  /api/intelligibility       - 获取语音清晰度分析");
-    info!("  POST /api/intelligibility       - 提交STI分析");
-    info!("  GET  /api/alerts                - 获取告警信息");
-    info!("  GET  /api/sound-field/{{site_id}} - 获取声场快照");
-    info!("  POST /api/simulate/acoustics    - 运行几何声学仿真");
-    info!("  POST /api/simulate/sti          - 运行STI语音清晰度分析");
-    info!("  POST /api/simulate/wave-field   - 运行波动声学声场仿真");
-    info!("  GET  /api/stats                 - 获取系统统计");
     info!("=====================================================");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

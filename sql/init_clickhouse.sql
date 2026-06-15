@@ -181,3 +181,98 @@ AS SELECT
     avg(clarity_c50) AS avg_c50
 FROM speech_intelligibility
 GROUP BY site_id, toStartOfHour(timestamp);
+
+CREATE TABLE IF NOT EXISTS acoustic_measurements_5min
+(
+    timestamp   DateTime64(3),
+    site_id     LowCardinality(String),
+    sensor_id   String,
+    avg_spl     Float64,
+    max_spl     Float64,
+    min_spl     Float64,
+    avg_t60     Float64,
+    max_t60     Float64,
+    min_t60     Float64,
+    sample_count UInt32
+)
+ENGINE = SummingMergeTree()
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (site_id, sensor_id, timestamp)
+TTL timestamp + INTERVAL 5 YEAR;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS acoustic_measurements_5min_mv
+TO acoustic_measurements_5min
+AS SELECT
+    toStartOfFiveMinutes(timestamp) AS timestamp,
+    site_id,
+    sensor_id,
+    avg(sound_pressure_level) AS avg_spl,
+    max(sound_pressure_level) AS max_spl,
+    min(sound_pressure_level) AS min_spl,
+    avg(reverb_time_t60) AS avg_t60,
+    max(reverb_time_t60) AS max_t60,
+    min(reverb_time_t60) AS min_t60,
+    count() AS sample_count
+FROM acoustic_measurements
+GROUP BY timestamp, site_id, sensor_id;
+
+CREATE TABLE IF NOT EXISTS sti_hourly_stats
+(
+    timestamp   DateTime64(3),
+    site_id     LowCardinality(String),
+    avg_sti     Float64,
+    min_sti     Float64,
+    max_sti     Float64,
+    avg_d50     Float64,
+    avg_c50     Float64,
+    sample_count UInt32
+)
+ENGINE = SummingMergeTree()
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (site_id, timestamp)
+TTL timestamp + INTERVAL 5 YEAR;
+
+DROP VIEW IF EXISTS sti_hourly_avg_mv;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS sti_hourly_stats_mv
+TO sti_hourly_stats
+AS SELECT
+    toStartOfHour(timestamp) AS timestamp,
+    site_id,
+    avg(sti_value) AS avg_sti,
+    min(sti_value) AS min_sti,
+    max(sti_value) AS max_sti,
+    avg(definition_d50) AS avg_d50,
+    avg(clarity_c50) AS avg_c50,
+    count() AS sample_count
+FROM speech_intelligibility
+GROUP BY timestamp, site_id;
+
+CREATE TABLE IF NOT EXISTS alerts_daily_summary
+(
+    day                 Date,
+    site_id             LowCardinality(String),
+    alert_type          LowCardinality(String),
+    severity            LowCardinality(String),
+    total_alerts        UInt32,
+    acknowledged_alerts UInt32
+)
+ENGINE = SummingMergeTree()
+ORDER BY (site_id, alert_type, day)
+TTL day + INTERVAL 3 YEAR;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS alerts_daily_summary_mv
+TO alerts_daily_summary
+AS SELECT
+    toStartOfDay(timestamp) AS day,
+    site_id,
+    alert_type,
+    severity,
+    count() AS total_alerts,
+    countIf(acknowledged = 1) AS acknowledged_alerts
+FROM acoustic_alerts
+GROUP BY day, site_id, alert_type, severity;
+
+ALTER TABLE acoustic_measurements MODIFY TTL timestamp + INTERVAL 1 YEAR;
+ALTER TABLE sound_propagation_paths MODIFY TTL timestamp + INTERVAL 6 MONTH;
+ALTER TABLE acoustic_alerts MODIFY TTL timestamp + INTERVAL 2 YEAR;

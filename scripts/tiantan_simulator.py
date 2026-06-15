@@ -14,10 +14,20 @@ import argparse
 import requests
 import paho.mqtt.client as mqtt
 from datetime import datetime, timezone
-from dataclasses import dataclass, asdict
-from typing import List, Dict, Tuple
+from dataclasses import dataclass, asdict, field
+from typing import List, Dict, Tuple, Optional
 
 SPEED_OF_SOUND = 343.0
+
+SOURCE_PRESETS = {
+    "center": (0.0, 1.5, 0.0),
+    "wall_north": (0.0, 1.8, 30.0),
+    "wall_south": (0.0, 1.8, -30.0),
+    "altar_center": (0.0, 5.0, -30.0),
+    "stone_1": (0.0, 0.1, 4.0),
+    "stone_2": (0.0, 0.1, 5.0),
+    "stone_3": (0.0, 0.1, 6.0),
+}
 
 SITES = {
     "huiyinbi": {
@@ -85,16 +95,29 @@ class Measurement:
     temperature: float
     humidity: float
     wind_speed: float
+    frequency: float = 1000.0
+    source_position: List[float] = field(default_factory=lambda: [0.0, 1.5, 0.0])
+
+
+def compute_air_absorption(frequency: float) -> float:
+    return 0.003 * (frequency / 1000.0) ** 1.5
 
 
 class TiantanAcousticSimulator:
-    def __init__(self, api_url: str, mqtt_host: str = "localhost", mqtt_port: int = 1883):
+    def __init__(self, api_url: str, mqtt_host: str = "localhost", mqtt_port: int = 1883,
+                 source_position: Tuple = (0.0, 1.5, 0.0), frequency: float = 1000.0,
+                 frequencies: Optional[List[float]] = None,
+                 active_sites: Optional[List[str]] = None):
         self.api_url = api_url.rstrip("/")
         self.mqtt_client = mqtt.Client(client_id=f"tiantan-simulator-{uuid.uuid4().hex[:8]}")
         self.mqtt_host = mqtt_host
         self.mqtt_port = mqtt_port
         self.anomaly_mode = False
         self.anomaly_site = None
+        self.source_position = source_position
+        self.frequency = frequency
+        self.frequencies = frequencies or [frequency]
+        self.active_sites = active_sites or list(SITES.keys())
 
         try:
             self.mqtt_client.connect(mqtt_host, mqtt_port, keepalive=60)
@@ -103,28 +126,35 @@ class TiantanAcousticSimulator:
         except Exception as e:
             print(f"[MQTT] Connection failed: {e}, continuing with HTTP only")
 
-    def generate_pulse_response(self, site: Dict, sensor_pos: Tuple, sample_rate: int = 44100,
+    def generate_pulse_response(self, site: Dict, sensor_pos: Tuple,
+                                 source_position: Optional[Tuple] = None,
+                                 frequency: float = 1000.0,
+                                 sample_rate: int = 44100,
                                  duration: float = 2.5) -> List[float]:
+        src = source_position if source_position is not None else self.source_position
         num_samples = int(sample_rate * duration)
         ir = [0.0] * num_samples
 
-        src = (0.0, 1.5, 0.0)
         direct_dist = math.sqrt(sum((s - src[i]) ** 2 for i, s in enumerate(sensor_pos)))
         direct_idx = int(direct_dist / SPEED_OF_SOUND * sample_rate)
         if direct_idx < num_samples:
-            ir[direct_idx] = 1.0
+            air_atten_db = compute_air_absorption(frequency) * direct_dist
+            direct_amp = 10.0 ** (-air_atten_db / 20.0)
+            ir[direct_idx] = direct_amp
 
         r = site["radius"]
         num_reflections = random.randint(3, 8)
         for refl in range(1, num_reflections + 1):
             angle = random.uniform(0, 2 * math.pi)
-            img_src = (r * math.cos(angle), 1.5, r * math.sin(angle))
+            img_src = (r * math.cos(angle), src[1], r * math.sin(angle))
             dist = math.sqrt(sum((s - img_src[i]) ** 2 for i, s in enumerate(sensor_pos)))
             dist += refl * random.uniform(0.5, 2.0)
             idx = int(dist / SPEED_OF_SOUND * sample_rate)
             if idx < num_samples:
                 amplitude = math.exp(-refl * 0.3) * (1.0 - site["wall_absorption"]) ** refl
                 amplitude *= random.uniform(0.7, 1.0)
+                air_atten_db = compute_air_absorption(frequency) * dist
+                amplitude *= 10.0 ** (-air_atten_db / 20.0)
                 ir[idx] += amplitude
 
         for i in range(num_samples):
@@ -179,10 +209,14 @@ class TiantanAcousticSimulator:
 
         return max(t_t60, 0.5), max(t_t30, 0.4), max(t_edt, 0.3)
 
-    def generate_measurement(self, site_id: str, sensor: Dict) -> Measurement:
+    def generate_measurement(self, site_id: str, sensor: Dict,
+                              frequency: float = 1000.0,
+                              source_position: Optional[Tuple] = None) -> Measurement:
         site = SITES[site_id]
         sr = 44100
-        ir = self.generate_pulse_response(site, sensor["pos"])
+        ir = self.generate_pulse_response(site, sensor["pos"],
+                                           source_position=source_position,
+                                           frequency=frequency)
         t60, t30, edt = self.compute_reverb(ir, sr)
 
         base_t60 = site["base_reverb_t60"]
@@ -191,17 +225,22 @@ class TiantanAcousticSimulator:
             t30 = t60 * 0.85
             edt = t60 * 0.6
 
-        t60 = t60 * random.uniform(0.85, 1.15)
-        t30 = t30 * random.uniform(0.85, 1.15)
-        edt = edt * random.uniform(0.85, 1.15)
+        freq_factor = (frequency / 1000.0) ** 0.3
+        t60 = t60 * random.uniform(0.85, 1.15) / freq_factor
+        t30 = t30 * random.uniform(0.85, 1.15) / freq_factor
+        edt = edt * random.uniform(0.85, 1.15) / freq_factor
 
         spl = site["base_spl"] + random.gauss(0, 4)
+        air_atten = compute_air_absorption(frequency) * 10.0
+        spl -= air_atten
         if self.anomaly_mode and self.anomaly_site == site["name"]:
             spl = random.uniform(25, 35)
 
         temp = random.uniform(15, 30)
         humidity = random.uniform(30, 80)
         wind = random.uniform(0, 5)
+
+        src = source_position if source_position is not None else self.source_position
 
         return Measurement(
             site_id=site_id,
@@ -215,6 +254,8 @@ class TiantanAcousticSimulator:
             temperature=temp,
             humidity=humidity,
             wind_speed=wind,
+            frequency=frequency,
+            source_position=list(src),
         )
 
     def send_measurement(self, m: Measurement) -> bool:
@@ -229,7 +270,7 @@ class TiantanAcousticSimulator:
                 timeout=5,
             )
             if resp.status_code == 200:
-                print(f"  [OK] {m.sensor_id} SPL={m.sound_pressure_level:.1f}dB T60={m.reverb_time_t60:.2f}s")
+                print(f"  [OK] {m.sensor_id} f={m.frequency:.0f}Hz SPL={m.sound_pressure_level:.1f}dB T60={m.reverb_time_t60:.2f}s")
             else:
                 print(f"  [HTTP {resp.status_code}] {resp.text}")
                 return False
@@ -245,7 +286,7 @@ class TiantanAcousticSimulator:
 
         return True
 
-    def simulate_sti_analysis(self, site_id: str) -> None:
+    def simulate_sti_analysis(self, site_id: str, frequency: float = 1000.0) -> None:
         site = SITES[site_id]
         base_sti = {
             "huiyinbi": 0.72,
@@ -255,6 +296,9 @@ class TiantanAcousticSimulator:
 
         if self.anomaly_mode and self.anomaly_site == site["name"]:
             base_sti = random.uniform(0.25, 0.40)
+
+        freq_penalty = 0.02 * math.log10(frequency / 1000.0) if frequency > 0 else 0
+        base_sti += freq_penalty
 
         sti_value = max(0.0, min(1.0, base_sti + random.gauss(0, 0.05)))
         rasti = max(0.0, min(1.0, sti_value * random.uniform(1.02, 1.10)))
@@ -296,15 +340,22 @@ class TiantanAcousticSimulator:
         if self.anomaly_mode:
             print(f"*** 异常模式已启用: {self.anomaly_site} 声学特性异常退化 ***")
 
-        for site_id, site in SITES.items():
-            print(f"\n[{site['name']}] {len(site['sensors'])} 个传感器:")
-            for sensor in site["sensors"]:
-                m = self.generate_measurement(site_id, sensor)
-                self.send_measurement(m)
+        active_site_ids = [sid for sid in SITES if sid in self.active_sites]
+
+        for site_id in active_site_ids:
+            site = SITES[site_id]
+            print(f"\n[{site['name']}] {len(site['sensors'])} 个传感器, 频率: {self.frequencies}")
+            for freq in self.frequencies:
+                for sensor in site["sensors"]:
+                    m = self.generate_measurement(site_id, sensor,
+                                                   frequency=freq,
+                                                   source_position=self.source_position)
+                    self.send_measurement(m)
 
         print("\n[语音清晰度分析 (STI)]:")
-        for site_id in SITES:
-            self.simulate_sti_analysis(site_id)
+        for site_id in active_site_ids:
+            for freq in self.frequencies:
+                self.simulate_sti_analysis(site_id, frequency=freq)
 
     def run_continuous(self, interval_sec: int = 60) -> None:
         print(f"开始连续模拟模式，每 {interval_sec} 秒上报一次数据")
@@ -349,6 +400,11 @@ class TiantanAcousticSimulator:
             pass
 
 
+def load_config(path: str) -> Dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def main():
     parser = argparse.ArgumentParser(description="天坛声学模拟器")
     parser.add_argument("--api-url", default="http://localhost:8080", help="后端API地址")
@@ -358,7 +414,45 @@ def main():
     parser.add_argument("--interval", type=int, default=60, help="连续模式上报间隔(秒)")
     parser.add_argument("--anomaly", action="store_true", help="启用异常模式(声学退化)")
     parser.add_argument("--anomaly-site", default="回音壁", help="异常退化的场所名")
+    parser.add_argument("--source-x", type=float, default=0.0, help="声源X坐标")
+    parser.add_argument("--source-y", type=float, default=1.5, help="声源Y坐标")
+    parser.add_argument("--source-z", type=float, default=0.0, help="声源Z坐标")
+    parser.add_argument("--frequency", type=float, default=1000, help="声源中心频率(Hz)")
+    parser.add_argument("--frequencies", type=str, default=None,
+                        help="多频段模式，逗号分隔频率列表，如 500,1000,2000,4000")
+    parser.add_argument("--source-preset", type=str, default=None, choices=list(SOURCE_PRESETS.keys()),
+                        help="声源位置预设，覆盖--source-x/y/z")
+    parser.add_argument("--config", type=str, default=None,
+                        help="JSON配置文件路径，加载站点/声源/频率设置")
+
     args = parser.parse_args()
+
+    source_position = (args.source_x, args.source_y, args.source_z)
+    frequency = args.frequency
+    frequencies = None
+    active_sites = list(SITES.keys())
+    interval = args.interval
+
+    if args.source_preset:
+        source_position = SOURCE_PRESETS[args.source_preset]
+
+    if args.frequencies:
+        frequencies = [float(f.strip()) for f in args.frequencies.split(",")]
+
+    if args.config:
+        config = load_config(args.config)
+        if "source_position" in config:
+            sp = config["source_position"]
+            source_position = (sp[0], sp[1], sp[2])
+        if "frequencies" in config:
+            frequencies = config["frequencies"]
+        if "sites" in config:
+            active_sites = config["sites"]
+        if "interval_seconds" in config:
+            interval = config["interval_seconds"]
+
+    if frequencies is None:
+        frequencies = [frequency]
 
     print("=" * 60)
     print("  天坛声学模拟器 - Acoustic Sensor Simulator")
@@ -366,8 +460,17 @@ def main():
     print(f"API: {args.api_url}")
     print(f"MQTT: {args.mqtt_host}:{args.mqtt_port}")
     print(f"模式: {args.mode}")
+    print(f"声源位置: {source_position}")
+    print(f"频率: {frequencies}")
+    print(f"活跃站点: {active_sites}")
 
-    sim = TiantanAcousticSimulator(args.api_url, args.mqtt_host, args.mqtt_port)
+    sim = TiantanAcousticSimulator(
+        args.api_url, args.mqtt_host, args.mqtt_port,
+        source_position=source_position,
+        frequency=frequency,
+        frequencies=frequencies,
+        active_sites=active_sites,
+    )
     if args.anomaly:
         sim.anomaly_mode = True
         sim.anomaly_site = args.anomaly_site
@@ -376,7 +479,7 @@ def main():
         if args.mode == "once":
             sim.run_once()
         else:
-            sim.run_continuous(args.interval)
+            sim.run_continuous(interval)
     finally:
         sim.close()
 
