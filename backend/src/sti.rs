@@ -4,13 +4,31 @@ use std::f64::consts::PI;
 const STI_OCTAVE_BANDS: [f64; 7] = [125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0];
 const RASTI_BANDS: [f64; 5] = [500.0, 1000.0, 2000.0, 4000.0, 8000.0];
 const STI_MODULATION_FREQS: [f64; 14] = [0.63, 0.8, 1.0, 1.25, 1.6, 2.0, 2.5, 3.15, 4.0, 5.0, 6.3, 8.0, 10.0, 12.5];
+
 const STI_BAND_WEIGHTS: [f64; 7] = [0.026, 0.061, 0.147, 0.203, 0.206, 0.202, 0.155];
+
+const ANCIENT_CHINESE_STI_WEIGHTS: [f64; 7] = [0.095, 0.120, 0.160, 0.195, 0.190, 0.145, 0.095];
+
+const ANCIENT_CHINESE_RASTI_WEIGHTS: [f64; 5] = [0.20, 0.22, 0.22, 0.20, 0.16];
+
 const RASTI_BAND_WEIGHTS: [f64; 5] = [0.15, 0.20, 0.20, 0.20, 0.25];
+
+const TONE_CRITICAL_MOD_FREQS: [f64; 4] = [2.0, 3.15, 5.0, 8.0];
+
+pub enum StiMode {
+    Standard,
+    AncientChinese,
+}
 
 pub struct StiCalculator;
 
 impl StiCalculator {
     pub fn analyze(params: &StiAnalysisParams) -> SpeechIntelligibility {
+        let mode = StiMode::AncientChinese;
+        Self::analyze_with_mode(params, &mode)
+    }
+
+    pub fn analyze_with_mode(params: &StiAnalysisParams, mode: &StiMode) -> SpeechIntelligibility {
         let ir = &params.impulse_response;
         let fs = params.sample_rate;
 
@@ -18,8 +36,8 @@ impl StiCalculator {
         let center_time = Self::compute_center_time(ir, fs);
         let crispness = Self::compute_crispness(ir, fs);
 
-        let (sti_value, band_snr) = Self::compute_sti(ir, fs, params.background_noise_level, params.speech_level);
-        let rasti_value = Self::compute_rasti(ir, fs, params.background_noise_level, params.speech_level);
+        let (sti_value, band_snr) = Self::compute_sti(ir, fs, params.background_noise_level, params.speech_level, mode);
+        let rasti_value = Self::compute_rasti(ir, fs, params.background_noise_level, params.speech_level, mode);
 
         SpeechIntelligibility {
             timestamp: chrono::Utc::now(),
@@ -48,7 +66,12 @@ impl StiCalculator {
         fs: u32,
         noise_level_db: f64,
         speech_level_db: f64,
+        mode: &StiMode,
     ) -> (f64, Vec<f64>) {
+        let weights = match mode {
+            StiMode::Standard => &STI_BAND_WEIGHTS,
+            StiMode::AncientChinese => &ANCIENT_CHINESE_STI_WEIGHTS,
+        };
         let mut band_snr = Vec::with_capacity(7);
         let mut mtis = Vec::with_capacity(7);
 
@@ -59,9 +82,16 @@ impl StiCalculator {
 
             for &fm in &STI_MODULATION_FREQS {
                 let mtf = Self::compute_mtf(&filtered, fs, fm);
+                let tone_boost = match mode {
+                    StiMode::AncientChinese if band_idx < 2 => {
+                        if TONE_CRITICAL_MOD_FREQS.contains(&fm) { 1.3 } else { 1.0 }
+                    }
+                    _ => 1.0,
+                };
                 let mti = if mtf > 0.001 {
                     let snr_eff = (speech_level_db - noise_level_db).clamp(-15.0, 15.0);
-                    Self::snr_to_mti(mtf, snr_eff)
+                    let raw_mti = Self::snr_to_mti(mtf, snr_eff);
+                    (raw_mti * tone_boost).min(1.0)
                 } else {
                     0.0
                 };
@@ -79,7 +109,7 @@ impl StiCalculator {
         }
 
         let sti: f64 = mtis.iter().enumerate()
-            .map(|(i, &m)| STI_BAND_WEIGHTS[i] * m)
+            .map(|(i, &m)| weights[i] * m)
             .sum();
 
         (sti.clamp(0.0, 1.0), band_snr)
@@ -90,7 +120,12 @@ impl StiCalculator {
         fs: u32,
         noise_level_db: f64,
         speech_level_db: f64,
+        mode: &StiMode,
     ) -> f64 {
+        let rasti_weights = match mode {
+            StiMode::Standard => &RASTI_BAND_WEIGHTS,
+            StiMode::AncientChinese => &ANCIENT_CHINESE_RASTI_WEIGHTS,
+        };
         let rasti_mod_freqs = [0.5, 1.0, 2.0, 4.0, 8.0];
         let mut weighted_sum = 0.0;
 
@@ -103,7 +138,7 @@ impl StiCalculator {
             let avg_mtf = mtf_sum / rasti_mod_freqs.len() as f64;
             let snr_eff = (speech_level_db - noise_level_db).clamp(-15.0, 15.0);
             let mti = Self::snr_to_mti(avg_mtf, snr_eff);
-            weighted_sum += RASTI_BAND_WEIGHTS[band_idx] * mti;
+            weighted_sum += rasti_weights[band_idx] * mti;
         }
 
         weighted_sum.clamp(0.0, 1.0)

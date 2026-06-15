@@ -16,10 +16,6 @@
         .app-container { display: flex; height: 100vh; }
         .main-view { flex: 1; position: relative; }
         #three-canvas { width: 100%; height: 100%; display: block; }
-        #particle-canvas {
-            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            pointer-events: none; z-index: 10;
-        }
         .sidebar {
             width: 380px; background: rgba(15, 20, 40, 0.92);
             border-left: 2px solid #8b6914; padding: 20px;
@@ -173,7 +169,6 @@
     <div class="app-container">
         <div class="main-view">
             <canvas id="three-canvas"></canvas>
-            <canvas id="particle-canvas"></canvas>
 
             <div class="hud-overlay">
                 <div class="hud-title">天坛声学实时监控</div>
@@ -317,21 +312,60 @@
         const API_BASE = window.location.protocol === 'file:' ? 'http://localhost:8080' : '';
 
         let scene, camera, renderer, controls;
-        let particleCanvas, particleCtx;
         let soundFieldCanvas, soundFieldCtx;
         let currentSite = 'huiyinbi';
         let simParams = { frequency: 1000, reflections: 8, rays: 100, speed: 5 };
-        let particles = [];
         let particleRunning = true;
         let soundPaths = [];
         let lastTime = performance.now();
         let frameCount = 0;
+
+        const MAX_PARTICLES = 4096;
+        let particleInstances = null;
+        let particleDummy = null;
+        let particleData = [];
+        let rayLineSegments = null;
+        let rayLinePositions = null;
+        let rayLineGeometry = null;
+        let activeParticleCount = 0;
 
         const siteColors = {
             huiyinbi: { wall: 0x8b6914, accent: 0xd4af37 },
             sanyinshi: { wall: 0x696969, accent: 0xa0a0a0 },
             huanqiutan: { wall: 0xf5f5f5, accent: 0xd4af37 }
         };
+
+        function initGPUParticles() {
+            particleDummy = new THREE.Object3D();
+            const geom = new THREE.SphereGeometry(0.25, 6, 4);
+            const mat = new THREE.MeshBasicMaterial({
+                transparent: true, depthWrite: false,
+                blending: THREE.AdditiveBlending
+            });
+            particleInstances = new THREE.InstancedMesh(geom, mat, MAX_PARTICLES);
+            particleInstances.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+            particleInstances.frustumCulled = false;
+            particleInstances.count = 0;
+
+            const colors = new Float32Array(MAX_PARTICLES * 3);
+            particleInstances.instanceColor = new THREE.InstancedBufferAttribute(colors, 3);
+            particleInstances.instanceColor.setUsage(THREE.DynamicDrawUsage);
+
+            scene.add(particleInstances);
+
+            rayLineGeometry = new THREE.BufferGeometry();
+            rayLinePositions = new Float32Array(MAX_PARTICLES * 6);
+            rayLineGeometry.setAttribute('position', new THREE.BufferAttribute(rayLinePositions, 3));
+            rayLineGeometry.setDrawRange(0, 0);
+            rayLineGeometry.attributes.position.setUsage(THREE.DynamicDrawUsage);
+
+            const lineMat = new THREE.LineBasicMaterial({
+                color: 0xd4af37, transparent: true, opacity: 0.06,
+                blending: THREE.AdditiveBlending, depthWrite: false
+            });
+            rayLineSegments = new THREE.LineSegments(rayLineGeometry, lineMat);
+            scene.add(rayLineSegments);
+        }
 
         function initThreeJS() {
             const canvas = document.getElementById('three-canvas');
@@ -368,6 +402,7 @@
 
             buildTiantanComplex();
             buildGround();
+            initGPUParticles();
             animate();
         }
 
@@ -571,19 +606,6 @@
             return sprite;
         }
 
-        function initParticles() {
-            particleCanvas = document.getElementById('particle-canvas');
-            particleCtx = particleCanvas.getContext('2d');
-            resizeParticleCanvas();
-            window.addEventListener('resize', () => { resizeParticleCanvas(); resizeRenderer(); });
-        }
-
-        function resizeParticleCanvas() {
-            const main = document.querySelector('.main-view');
-            particleCanvas.width = main.clientWidth;
-            particleCanvas.height = main.clientHeight;
-        }
-
         function resizeRenderer() {
             const canvas = document.getElementById('three-canvas');
             camera.aspect = canvas.clientWidth / canvas.clientHeight;
@@ -608,59 +630,80 @@
             soundFieldCtx.fillText('点击"计算波动声场"生成云图', soundFieldCanvas.width / 2, soundFieldCanvas.height / 2);
         }
 
-        function worldToScreen(x, y, z) {
-            const vec = new THREE.Vector3(x, y, z);
-            vec.project(camera);
-            const main = document.querySelector('.main-view');
-            return {
-                x: (vec.x * 0.5 + 0.5) * main.clientWidth,
-                y: (-vec.y * 0.5 + 0.5) * main.clientHeight,
-                visible: vec.z < 1
-            };
+        function getAttenuationColor(db) {
+            if (db < 20) return new THREE.Color(0.27, 1.0, 0.27);
+            if (db < 40) return new THREE.Color(1.0, 1.0, 0.27);
+            if (db < 60) return new THREE.Color(1.0, 0.67, 0.27);
+            return new THREE.Color(1.0, 0.27, 0.27);
         }
 
         function spawnParticlesFromPaths(paths) {
-            particles = [];
+            particleData = [];
+            let lineIdx = 0;
+
             paths.forEach(path => {
                 if (path.path_points.length < 2) return;
                 const color = getAttenuationColor(path.attenuation_db);
+
                 for (let p = 0; p < path.path_points.length - 1; p++) {
                     const start = path.path_points[p];
                     const end = path.path_points[p + 1];
-                    particles.push({
-                        x: start.x, y: start.y, z: start.z,
-                        tx: end.x, ty: end.y, tz: end.z,
-                        progress: Math.random() * 0.3,
-                        speed: 0.008 + Math.random() * 0.008,
-                        size: 2 + Math.random() * 2,
-                        color,
-                        alpha: 0.6 + Math.random() * 0.4,
-                        life: 1,
-                        segment: p
-                    });
+
+                    if (particleData.length < MAX_PARTICLES) {
+                        particleData.push({
+                            x: start.x, y: start.y, z: start.z,
+                            tx: end.x, ty: end.y, tz: end.z,
+                            progress: Math.random() * 0.3,
+                            speed: 0.008 + Math.random() * 0.008,
+                            color,
+                            life: 1.0,
+                            segment: p,
+                            pathIndex: paths.indexOf(path)
+                        });
+                    }
+
+                    if (lineIdx < MAX_PARTICLES * 6 - 5) {
+                        rayLinePositions[lineIdx++] = start.x;
+                        rayLinePositions[lineIdx++] = start.y;
+                        rayLinePositions[lineIdx++] = start.z;
+                        rayLinePositions[lineIdx++] = end.x;
+                        rayLinePositions[lineIdx++] = end.y;
+                        rayLinePositions[lineIdx++] = end.z;
+                    }
                 }
             });
+
+            activeParticleCount = particleData.length;
+            particleInstances.count = activeParticleCount;
+
+            const colorAttr = particleInstances.instanceColor;
+            for (let i = 0; i < activeParticleCount; i++) {
+                colorAttr.setXYZ(i, particleData[i].color.r, particleData[i].color.g, particleData[i].color.b);
+            }
+            colorAttr.needsUpdate = true;
+
+            rayLineGeometry.attributes.position.needsUpdate = true;
+            rayLineGeometry.setDrawRange(0, lineIdx / 3);
+
             soundPaths = paths;
             document.getElementById('ray-count').textContent = paths.length;
-            document.getElementById('particle-count').textContent = particles.length;
+            document.getElementById('particle-count').textContent = activeParticleCount;
         }
 
-        function getAttenuationColor(db) {
-            if (db < 20) return { r: 68, g: 255, b: 68 };
-            if (db < 40) return { r: 255, g: 255, b: 68 };
-            if (db < 60) return { r: 255, g: 170, b: 68 };
-            return { r: 255, g: 68, b: 68 };
-        }
-
-        function updateParticles(dt) {
-            if (!particleRunning) return;
+        function updateGPUParticles(dt) {
+            if (!particleRunning || activeParticleCount === 0) return;
             const speedMult = simParams.speed / 5;
-            for (let i = particles.length - 1; i >= 0; i--) {
-                const p = particles[i];
+            const mat = particleInstances.instanceMatrix;
+            const colAttr = particleInstances.instanceColor;
+            let aliveCount = 0;
+
+            for (let i = 0; i < activeParticleCount; i++) {
+                const p = particleData[i];
                 p.progress += p.speed * speedMult * dt * 0.06;
+
                 if (p.progress >= 1) {
-                    const path = soundPaths.find(pp => pp.path_points.length > p.segment + 2);
-                    if (path) {
+                    const path = soundPaths[p.pathIndex];
+                    if (path && path.path_points.length > p.segment + 2) {
                         const next = path.path_points[p.segment + 1];
                         const nextEnd = path.path_points[p.segment + 2];
                         if (next && nextEnd) {
@@ -668,53 +711,39 @@
                             p.tx = nextEnd.x; p.ty = nextEnd.y; p.tz = nextEnd.z;
                             p.progress = 0;
                             p.segment++;
-                            continue;
                         }
+                    } else {
+                        p.life -= 0.01 * dt;
                     }
-                    p.life -= 0.01 * dt;
                 }
-                p.alpha = Math.min(1, p.life);
-                if (p.life <= 0 || p.alpha <= 0) particles.splice(i, 1);
-            }
-            document.getElementById('particle-count').textContent = particles.length;
-        }
 
-        function renderParticles() {
-            particleCtx.clearRect(0, 0, particleCanvas.width, particleCanvas.height);
-            if (soundPaths.length > 0) {
-                particleCtx.strokeStyle = 'rgba(212, 175, 55, 0.04)';
-                particleCtx.lineWidth = 1;
-                soundPaths.forEach(path => {
-                    if (path.path_points.length < 2) return;
-                    particleCtx.beginPath();
-                    let first = true;
-                    for (const pt of path.path_points) {
-                        const s = worldToScreen(pt.x, pt.y, pt.z);
-                        if (!s.visible) { first = true; continue; }
-                        if (first) { particleCtx.moveTo(s.x, s.y); first = false; }
-                        else particleCtx.lineTo(s.x, s.y);
-                    }
-                    particleCtx.stroke();
-                });
-            }
-            particles.forEach(p => {
+                if (p.life <= 0) {
+                    particleDummy.position.set(0, -1000, 0);
+                    particleDummy.scale.set(0, 0, 0);
+                    particleDummy.updateMatrix();
+                    mat.setMatrixAt(i, particleDummy.matrix);
+                    colAttr.setXYZ(i, 0, 0, 0);
+                    continue;
+                }
+
                 const x = p.x + (p.tx - p.x) * p.progress;
                 const y = p.y + (p.ty - p.y) * p.progress;
                 const z = p.z + (p.tz - p.z) * p.progress;
-                const s = worldToScreen(x, y, z);
-                if (!s.visible) return;
-                particleCtx.beginPath();
-                const grad = particleCtx.createRadialGradient(s.x, s.y, 0, s.x, s.y, p.size * 3);
-                grad.addColorStop(0, `rgba(${p.color.r},${p.color.g},${p.color.b},${p.alpha})`);
-                grad.addColorStop(1, `rgba(${p.color.r},${p.color.g},${p.color.b},0)`);
-                particleCtx.fillStyle = grad;
-                particleCtx.arc(s.x, s.y, p.size * 3, 0, Math.PI * 2);
-                particleCtx.fill();
-                particleCtx.beginPath();
-                particleCtx.fillStyle = `rgba(255,255,255,${p.alpha})`;
-                particleCtx.arc(s.x, s.y, p.size * 0.6, 0, Math.PI * 2);
-                particleCtx.fill();
-            });
+
+                const s = 0.2 + p.life * 0.3;
+                particleDummy.position.set(x, y, z);
+                particleDummy.scale.set(s, s, s);
+                particleDummy.updateMatrix();
+                mat.setMatrixAt(i, particleDummy.matrix);
+
+                const fade = Math.min(1, p.life);
+                colAttr.setXYZ(i, p.color.r * fade, p.color.g * fade, p.color.b * fade);
+                aliveCount++;
+            }
+
+            mat.needsUpdate = true;
+            colAttr.needsUpdate = true;
+            document.getElementById('particle-count').textContent = aliveCount;
         }
 
         function animate() {
@@ -727,8 +756,7 @@
                 document.getElementById('fps').textContent = Math.round(1000 / (dt + 0.001));
             }
             controls.update();
-            updateParticles(dt);
-            renderParticles();
+            updateGPUParticles(dt);
             renderer.render(scene, camera);
         }
 
@@ -971,8 +999,8 @@
 
         window.addEventListener('load', () => {
             initThreeJS();
-            initParticles();
             initSoundField();
+            window.addEventListener('resize', resizeRenderer);
             setTimeout(() => loadLatestData(currentSite), 800);
             setInterval(() => loadLatestData(currentSite), 10000);
         });

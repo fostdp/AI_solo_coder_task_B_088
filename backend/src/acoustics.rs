@@ -7,6 +7,31 @@ use std::f64::consts::PI;
 
 const SPEED_OF_SOUND: f64 = 343.0;
 const AIR_ABSORPTION_COEFF: f64 = 0.005;
+const DIFFRACTION_THRESHOLD: f64 = 0.1;
+
+fn fresnel_number(path_diff: f64, frequency: f64) -> f64 {
+    let wavelength = SPEED_OF_SOUND / frequency.max(1.0);
+    2.0 * path_diff / wavelength
+}
+
+fn utd_diffraction_coeff(fresnel_n: f64) -> f64 {
+    if fresnel_n < -1.0 { return 0.5; }
+    if fresnel_n > 5.0 { return 0.0; }
+    let x = fresnel_n * (PI / 2.0).sqrt();
+    let c = 0.5 * (0.5 - x.cos() * (0.5 * PI * fresnel_n.abs()).sin().copysign(1.0));
+    let s = 0.5 * (0.5 + x.sin() * (0.5 * PI * fresnel_n.abs()).cos().copysign(1.0));
+    (c * c + s * s).sqrt() * 0.5
+}
+
+fn diffraction_scatter(frequency: f64, wall_height: f64) -> f64 {
+    let wavelength = SPEED_OF_SOUND / frequency.max(1.0);
+    let ratio = wavelength / wall_height.max(0.1);
+    if ratio > DIFFRACTION_THRESHOLD {
+        (ratio - DIFFRACTION_THRESHOLD).min(1.0) * 0.3
+    } else {
+        0.0
+    }
+}
 
 pub struct AcousticSimulator {
     pub site_params: SiteAcousticParams,
@@ -75,6 +100,8 @@ impl AcousticSimulator {
         let mut rng = thread_rng();
         let mut paths = Vec::new();
         let src = params.source_position.to_point3();
+        let wavelength = SPEED_OF_SOUND / params.frequency.max(1.0);
+        let low_freq = wavelength / self.site_params.wall_height.max(0.1) > DIFFRACTION_THRESHOLD;
 
         for _ in 0..params.num_rays {
             let theta = rng.gen_range(0.0..2.0 * PI);
@@ -88,8 +115,33 @@ impl AcousticSimulator {
 
             let path = self.trace_single_ray(&src, &dir, params.max_reflections, params.frequency);
             paths.push(path);
+
+            if low_freq {
+                let num_diff = rng.gen_range(1u32..=3);
+                for _ in 0..num_diff {
+                    let dtheta = theta + rng.gen_range(-0.3..0.3);
+                    let dphi = phi + rng.gen_range(0.0..0.4 * PI);
+                    let ddir = Vector3::new(
+                        dphi.sin() * dtheta.cos(),
+                        dphi.cos(),
+                        dphi.sin() * dtheta.sin(),
+                    );
+                    let ddir = UnitVector3::new_normalize(ddir);
+                    let mut dpath = self.trace_single_ray(&src, &ddir, params.max_reflections, params.frequency);
+                    dpath.attenuation_db += self.compute_diffraction_loss(params.frequency);
+                    paths.push(dpath);
+                }
+            }
         }
         paths
+    }
+
+    fn compute_diffraction_loss(&self, frequency: f64) -> f64 {
+        let wavelength = SPEED_OF_SOUND / frequency.max(1.0);
+        let h = self.site_params.wall_height;
+        let fresnel_n = fresnel_number(h * 0.5, frequency);
+        let diff_coeff = utd_diffraction_coeff(fresnel_n);
+        -20.0 * diff_coeff.max(0.001).log10()
     }
 
     fn trace_single_ray(
@@ -99,12 +151,14 @@ impl AcousticSimulator {
         max_reflections: u8,
         frequency: f64,
     ) -> SoundPath {
+        let mut rng = thread_rng();
         let mut current_pos = *src;
         let mut current_dir = *dir;
         let mut path_points = vec![Vec3::from_point3(&current_pos)];
         let mut total_distance = 0.0;
         let mut attenuation = 0.0;
         let mut reflections = 0u8;
+        let scatter = diffraction_scatter(frequency, self.site_params.wall_height);
 
         for _ in 0..=max_reflections {
             if let Some(hit) = self.intersect_circular_wall(&current_pos, &current_dir) {
@@ -116,11 +170,26 @@ impl AcousticSimulator {
                 attenuation += AIR_ABSORPTION_COEFF * total_distance * (frequency / 1000.0);
                 attenuation += -10.0 * (1.0 - self.site_params.wall_absorption).log10();
 
+                let fresnel_n = fresnel_number(distance * 0.5, frequency);
+                let diff_coeff = utd_diffraction_coeff(fresnel_n);
+                attenuation += -20.0 * (1.0 - diff_coeff * 0.3).max(0.001).log10();
+
                 path_points.push(Vec3::from_point3(&hit_point));
 
                 let normal = UnitVector3::new_normalize(hit_point - self.site_params.center);
                 let reflected = current_dir.into_inner() - 2.0 * current_dir.dot(&normal) * normal.into_inner();
-                current_dir = UnitVector3::new_normalize(reflected);
+
+                let scattered = if scatter > 0.0 {
+                    let perturb = Vector3::new(
+                        rng.gen_range(-scatter..scatter),
+                        rng.gen_range(-scatter..scatter),
+                        rng.gen_range(-scatter..scatter),
+                    );
+                    reflected + perturb
+                } else {
+                    reflected
+                };
+                current_dir = UnitVector3::new_normalize(scattered);
                 current_pos = hit_point + 0.001 * current_dir.into_inner();
                 reflections += 1;
             } else {
