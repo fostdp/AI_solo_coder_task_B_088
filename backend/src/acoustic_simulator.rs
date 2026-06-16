@@ -597,26 +597,70 @@ impl SimulatorTask {
         let listener = listener_pos.to_point3();
         let sound_direction = (src - listener).normalize();
         let azimuth = sound_direction.x.atan2(sound_direction.z);
+        let elevation = sound_direction.y.asin();
 
-        let left_ear_dist = head_radius * (PI - azimuth).cos().max(0.0);
-        let right_ear_dist = head_radius * (PI + azimuth).cos().max(0.0);
+        // Woodworth公式: ITD = (a/c) * (sin(θ) + θ)  for |θ| <= π/2
+        // 比纯几何投影更精确，高频极限下退化为Woodworth近似
+        let abs_az = azimuth.abs().min(PI / 2.0);
+        let itd_woodworth = (head_radius / 343.0) * (abs_az.sin() + abs_az);
+        let itd = itd_woodworth.copysign(azimuth);
 
-        let itd = (left_ear_dist - right_ear_dist) / 343.0;
-        let ild = 6.0 * azimuth.cos().abs();
+        // 频率依赖ILD模型
+        // 低频(<500Hz): ILD ≈ 0-2dB (声波绕射)
+        // 中频(1-2kHz): ILD ≈ 3-8dB (头影开始显著)
+        // 高频(>4kHz): ILD ≈ 8-15dB (头影完全遮挡)
+        // 使用典型1kHz作为参考频段
+        let ild_low = 1.5 * azimuth.sin().abs();
+        let ild_mid = 6.0 * azimuth.sin().abs();
+        let ild_high = 12.0 * azimuth.sin().abs();
+        let ild = ild_mid;
 
-        let delay_samples = (itd.abs() * sample_rate as f64) as usize;
+        // 耳廓效应 (Pinna effect): 高频方向性增益
+        // 前方声音得到增强，后方得到衰减，特别是4-8kHz频段
+        let pinna_gain_front = 2.0;
+        let pinna_gain_back = -3.0;
+        let pinna_gain_db = if azimuth.abs() < PI / 3.0 {
+            pinna_gain_front * (1.0 - azimuth.abs() / (PI / 3.0))
+        } else {
+            pinna_gain_back * ((azimuth.abs() - PI / 3.0) / (2.0 * PI / 3.0))
+        };
+
+        // 肩部反射效应: 约4-6kHz的谐振，增强前方定位
+        let shoulder_reflection_delay = 0.000_300; // 300μs
+        let shoulder_reflection_gain = 0.15;
+
+        let delay_samples = (itd.abs() * sample_rate as f64).round() as usize;
+        let shoulder_delay_samples = (shoulder_reflection_delay * sample_rate as f64).round() as usize;
+
+        let contralateral_atten = 10.0_f64.powf(-ild / 20.0);
+        let pinna_linear = 10.0_f64.powf(pinna_gain_db / 20.0);
+
         let mut left_ir = Vec::with_capacity(mono_ir.len());
         let mut right_ir = Vec::with_capacity(mono_ir.len());
 
-        if itd > 0.0 {
+        if itd >= 0.0 {
             for i in 0..mono_ir.len() {
-                left_ir.push(if i < delay_samples { 0.0 } else { mono_ir[i - delay_samples] });
-                right_ir.push(mono_ir[i] * 10.0_f64.powf(-ild / 20.0));
+                let left_val = if i < delay_samples { 0.0 } else { mono_ir[i - delay_samples] };
+                let mut right_val = mono_ir[i] * contralateral_atten;
+
+                if i >= shoulder_delay_samples {
+                    right_val += mono_ir[i - shoulder_delay_samples] * shoulder_reflection_gain * contralateral_atten;
+                }
+
+                left_ir.push(left_val * pinna_linear);
+                right_ir.push(right_val);
             }
         } else {
             for i in 0..mono_ir.len() {
-                right_ir.push(if i < delay_samples { 0.0 } else { mono_ir[i - delay_samples] });
-                left_ir.push(mono_ir[i] * 10.0_f64.powf(-ild / 20.0));
+                let mut left_val = mono_ir[i] * contralateral_atten;
+                let right_val = if i < delay_samples { 0.0 } else { mono_ir[i - delay_samples] };
+
+                if i >= shoulder_delay_samples {
+                    left_val += mono_ir[i - shoulder_delay_samples] * shoulder_reflection_gain * contralateral_atten;
+                }
+
+                left_ir.push(left_val);
+                right_ir.push(right_val * pinna_linear);
             }
         }
 
@@ -628,6 +672,13 @@ impl SimulatorTask {
             source_position: src_pos.clone(),
             itd_seconds: itd,
             ild_db: ild,
+            azimuth_rad: azimuth,
+            playback_mode: "headphone".to_string(),
+            headphone_optimized: true,
+            hrtf_notes: format!(
+                "Woodworth ITD: {:.1}μs | ILD(band): low={:.1}dB mid={:.1}dB high={:.1}dB | pinna: {:+.1}dB | shoulder_refl: {:.0}μs",
+                itd * 1e6, ild_low, ild_mid, ild_high, pinna_gain_db, shoulder_reflection_delay * 1e6
+            ),
         }
     }
 
@@ -639,29 +690,56 @@ impl SimulatorTask {
 
         let mut total_noise_energy = 0.0f64;
         let mut noise_contribution = HashMap::new();
+        let mut group_energy: HashMap<String, f64> = HashMap::new();
 
         for (i, noise_src) in params.noise_sources.iter().enumerate() {
             let noise_power = 10.0_f64.powf(noise_src.sound_level_db / 10.0);
             total_noise_energy += noise_power;
-            noise_contribution.insert(
-                format!("noise_{}", i),
-                noise_src.sound_level_db,
-            );
+            let gid = noise_src.group_id.clone().unwrap_or_else(|| format!("noise_{}", i));
+            *group_energy.entry(gid.clone()).or_insert(0.0) += noise_power;
+            noise_contribution.insert(gid, noise_src.sound_level_db);
         }
 
         let listener = params.listener_position.to_point3();
+
+        let n_sources = params.noise_sources.len().max(1) as f64;
+        let occlusion_factor = if n_sources > 10.0 {
+            1.0 - 0.03 * (n_sources / 10.0).ln().min(1.5)
+        } else {
+            1.0
+        };
+
         let mut total_energy_at_listener = 0.0f64;
         for noise_src in &params.noise_sources {
             let src = noise_src.position.to_point3();
-            let dist = (listener - src).norm().max(1.0);
-            let level_at_listener = noise_src.sound_level_db - 20.0 * (dist / 1.0).log10();
+            let diff = listener - src;
+            let dist = diff.norm().max(1.0);
+
+            let mut level_at_listener = noise_src.sound_level_db - 20.0 * (dist / 1.0).log10();
+
+            if let Some(ref dir) = noise_src.direction {
+                let dir_vec = dir.to_point3();
+                let dir_norm = dir_vec.norm();
+                if dir_norm > 1e-6 && dist > 1.0 {
+                    let to_listener = diff.normalize();
+                    let src_dir = (dir_vec / dir_norm).into();
+                    let cos_angle: f64 = to_listener.x * src_dir.x + to_listener.y * src_dir.y + to_listener.z * src_dir.z;
+                    let di = noise_src.directivity_index;
+                    let directivity_gain = 10.0_f64.powf(di / 10.0);
+                    let q = directivity_gain * cos_angle.max(0.0).powf(directivity_gain.ln().max(1.0)) + 1.0;
+                    level_at_listener += 10.0 * (q / (4.0 * PI)).log10();
+                }
+            }
+
+            level_at_listener += 10.0 * occlusion_factor.log10();
+
             total_energy_at_listener += 10.0_f64.powf(level_at_listener / 10.0);
         }
 
         let total_noise_level_db = 10.0 * total_energy_at_listener.log10();
         let snr_db = params.speech_level_db - total_noise_level_db;
 
-        let clean_sti = 0.75;
+        let clean_sti = self.compute_clean_sti_for_site(&params.site_id);
         let snr_factor = (snr_db / 20.0).tanh();
         let noisy_sti = 0.2 + (clean_sti - 0.2) * snr_factor.max(0.0);
         let sti_degradation = clean_sti - noisy_sti;
@@ -682,7 +760,20 @@ impl SimulatorTask {
                     let dx = px - noise_src.position.x;
                     let dz = pz - noise_src.position.z;
                     let dist = (dx * dx + dz * dz).sqrt().max(0.5);
-                    let level = noise_src.sound_level_db - 20.0 * (dist / 1.0).log10();
+                    let mut level = noise_src.sound_level_db - 20.0 * (dist / 1.0).log10();
+
+                    if let Some(ref dir) = noise_src.direction {
+                        let dir_vec = dir.to_point3();
+                        let dir_norm = dir_vec.norm();
+                        if dir_norm > 1e-6 {
+                            let dx_n = dx / dist;
+                            let dz_n = dz / dist;
+                            let cos_a = (dx_n * dir_vec.x + dz_n * dir_vec.z) / dir_norm;
+                            level += noise_src.directivity_index * cos_a.max(0.0);
+                        }
+                    }
+
+                    level += 10.0 * occlusion_factor.log10();
                     point_energy += 10.0_f64.powf(level / 10.0);
                 }
 
@@ -716,6 +807,31 @@ impl SimulatorTask {
             recommended_max_visitors: max_visitors,
             crowd_noise_map: noise_map,
             grid_resolution: grid_res,
+        }
+    }
+
+    fn compute_clean_sti_for_site(&self, site_id: &str) -> f64 {
+        match site_id {
+            "huiyinbi" => 0.75,
+            "sanyinshi" => 0.70,
+            "huanqiutan" => 0.68,
+            id if id.contains("temple") => {
+                if let Some(building) = self.config.ancient_buildings.get(id) {
+                    let t60 = building.typical_reverb_t60;
+                    (0.85 - (t60 - 1.0) * 0.20).clamp(0.2, 0.95)
+                } else {
+                    0.65
+                }
+            }
+            id if id.contains("hall") => {
+                if let Some(hall) = self.config.concert_halls.get(id) {
+                    let t60 = hall.typical_reverb_t60;
+                    (0.85 - (t60 - 1.0) * 0.20).clamp(0.2, 0.95)
+                } else {
+                    0.70
+                }
+            }
+            _ => 0.65,
         }
     }
 }

@@ -308,7 +308,15 @@ pub struct NoiseSource {
     pub sound_level_db: f64,
     pub source_type: String,
     pub frequency_hz: f64,
+    #[serde(default)]
+    pub direction: Option<Vec3>,
+    #[serde(default = "default_directivity")]
+    pub directivity_index: f64,
+    #[serde(default)]
+    pub group_id: Option<String>,
 }
+
+fn default_directivity() -> f64 { 3.0 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BinauralImpulseResponse {
@@ -319,7 +327,17 @@ pub struct BinauralImpulseResponse {
     pub source_position: Vec3,
     pub itd_seconds: f64,
     pub ild_db: f64,
+    #[serde(default)]
+    pub azimuth_rad: f64,
+    #[serde(default = "default_playback_mode")]
+    pub playback_mode: String,
+    #[serde(default)]
+    pub headphone_optimized: bool,
+    #[serde(default)]
+    pub hrtf_notes: String,
 }
+
+fn default_playback_mode() -> String { "headphone".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VirtualExperienceRequest {
@@ -453,7 +471,15 @@ pub struct BuildingMeta {
     pub typical_reverb_t60: f64,
     pub geometry_type: String,
     pub center_position: Vec3,
+    #[serde(default)]
+    pub literature_references: Vec<String>,
+    #[serde(default = "default_data_quality")]
+    pub data_quality: String,
+    #[serde(default)]
+    pub absorption_notes: String,
 }
+
+fn default_data_quality() -> String { "estimated".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AncientDynastyConfig {
