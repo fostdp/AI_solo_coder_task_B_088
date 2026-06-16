@@ -495,3 +495,59 @@ pub struct ModernConcertHallConfig {
     pub berlin_philharmonie: BuildingMeta,
     pub boston_symphony: BuildingMeta,
 }
+
+impl Default for AcousticConfig {
+    fn default() -> Self {
+        Self {
+            sites: std::collections::HashMap::new(),
+            ancient_buildings: std::collections::HashMap::new(),
+            concert_halls: std::collections::HashMap::new(),
+            simulation_defaults: SimDefaults::default(),
+            alert_thresholds: AlertThresholds::default(),
+            noise_defaults: NoiseDefaults::default(),
+            valid_site_ids: vec![],
+            valid_sensor_ids: vec![],
+            valid_building_ids: vec![],
+            valid_hall_ids: vec![],
+        }
+    }
+}
+
+impl Default for SimDefaults {
+    fn default() -> Self {
+        Self {
+            speed_of_sound: 343.0,
+            air_absorption_coefficient: 0.005,
+            diffraction_threshold: 0.1,
+            wave_field_grid_resolution: 32,
+            wave_field_image_sources: 50,
+        }
+    }
+}
+
+impl Default for AlertThresholds {
+    fn default() -> Self {
+        Self {
+            sti_min: 0.45,
+            rasti_min: 0.45,
+            reverb_t60_min: 0.5,
+            reverb_t60_max: 5.0,
+            spl_min_db: 30.0,
+            spl_max_db: 110.0,
+            definition_d50_min: 30.0,
+            clarity_c50_min: -5.0,
+        }
+    }
+}
+
+impl Default for NoiseDefaults {
+    fn default() -> Self {
+        Self {
+            visitor_noise_level_db: 55.0,
+            crowd_density_per_sqm: 0.3,
+            max_visitors: 500,
+            speech_level_db: 70.0,
+            noise_frequency_hz: 1000.0,
+        }
+    }
+}

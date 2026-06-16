@@ -1,6 +1,7 @@
 use crate::dtu_receiver::DtuReceiver;
 use crate::models::*;
 use crate::storage::ClickHouseStore;
+use crate::acoustic_pool::AcousticComputePool;
 use axum::{
     extract::{Path, State, Query},
     routing::{get, post},
@@ -18,6 +19,7 @@ pub struct AppState {
     pub sim_tx: tokio::sync::mpsc::Sender<SimulatorRequest>,
     pub analyzer_tx: tokio::sync::mpsc::Sender<AnalyzerRequest>,
     pub config: Arc<AcousticConfig>,
+    pub compute_pool: Arc<AcousticComputePool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -345,24 +347,15 @@ async fn compare_acoustics(
         }
     }
 
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let req = crate::models::AnalyzerRequest::CompareAcoustics { params, reply: reply_tx };
+    let comparison_type = params.comparison_type.as_deref().unwrap_or("design");
+    let result = match comparison_type {
+        "era" | "cross_era" => state.compute_pool.compare_eras(params).await,
+        _ => state.compute_pool.compare_dynasties(params).await,
+    };
 
-    if state.analyzer_tx.send(req).await.is_err() {
-        return Json(ApiResponse::error("分析模块不可用"));
-    }
-
-    match reply_rx.await {
-        Ok(result) => {
-            histogram!("simulation_duration_seconds", "type" => "compare").record(start.elapsed().as_secs_f64());
-            counter!("comparisons_total").increment(1);
-            Json(ApiResponse::ok(result))
-        }
-        Err(_) => {
-            counter!("simulation_failures_total", "type" => "compare").increment(1);
-            Json(ApiResponse::error("对比分析请求超时"))
-        }
-    }
+    histogram!("simulation_duration_seconds", "type" => "compare").record(start.elapsed().as_secs_f64());
+    counter!("comparisons_total").increment(1);
+    Json(ApiResponse::ok(result))
 }
 
 async fn simulate_noise(
@@ -376,24 +369,11 @@ async fn simulate_noise(
         return Json(ApiResponse::error("无效的场所ID"));
     }
 
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let req = crate::models::SimulatorRequest::NoiseSimulation { params, reply: reply_tx };
+    let result = state.compute_pool.simulate_noise(params).await;
 
-    if state.sim_tx.send(req).await.is_err() {
-        return Json(ApiResponse::error("仿真模块不可用"));
-    }
-
-    match reply_rx.await {
-        Ok(result) => {
-            histogram!("simulation_duration_seconds", "type" => "noise").record(start.elapsed().as_secs_f64());
-            counter!("simulations_total", "type" => "noise").increment(1);
-            Json(ApiResponse::ok(result))
-        }
-        Err(_) => {
-            counter!("simulation_failures_total", "type" => "noise").increment(1);
-            Json(ApiResponse::error("噪声模拟请求超时"))
-        }
-    }
+    histogram!("simulation_duration_seconds", "type" => "noise").record(start.elapsed().as_secs_f64());
+    counter!("simulations_total", "type" => "noise").increment(1);
+    Json(ApiResponse::ok(result))
 }
 
 async fn virtual_experience(
@@ -410,22 +390,39 @@ async fn virtual_experience(
         return Json(ApiResponse::error("无效的场所ID"));
     }
 
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let req = crate::models::SimulatorRequest::VirtualExperience { params, reply: reply_tx };
+    let sim_params = crate::models::SimulationParams {
+        site_id: params.site_id.clone(),
+        source_position: params.source_position.clone(),
+        frequency: params.frequency,
+        max_reflections: 10,
+        num_rays: 100,
+        temperature: 20.0,
+        humidity: 50.0,
+    };
 
-    if state.sim_tx.send(req).await.is_err() {
-        return Json(ApiResponse::error("仿真模块不可用"));
-    }
-
-    match reply_rx.await {
-        Ok(result) => {
-            histogram!("simulation_duration_seconds", "type" => "virtual_experience").record(start.elapsed().as_secs_f64());
-            counter!("simulations_total", "type" => "virtual_experience").increment(1);
-            Json(ApiResponse::ok(result))
-        }
-        Err(_) => {
+    let paths = match state.compute_pool.trace_rays(sim_params).await {
+        Ok(p) => p,
+        Err(e) => {
             counter!("simulation_failures_total", "type" => "virtual_experience").increment(1);
-            Json(ApiResponse::error("虚拟体验请求超时"))
+            return Json(ApiResponse::error(format!("射线追踪失败: {}", e)));
         }
-    }
+    };
+
+    let ir_t60 = match state.compute_pool.generate_impulse_response(
+        sim_params.clone(), 3.0, 44100) {
+        Ok(ir) => {
+            let t60_val = crate::acoustic_simulator::calculate_t60_from_ir(&ir, 44100);
+            (ir, t60_val)
+        }
+        Err(e) => {
+            counter!("simulation_failures_total", "type" => "virtual_experience").increment(1);
+            return Json(ApiResponse::error(format!("冲激响应生成失败: {}", e)));
+        }
+    };
+
+    let result = state.compute_pool.virtual_experience(params, paths, ir_t60.0, ir_t60.1).await;
+
+    histogram!("simulation_duration_seconds", "type" => "virtual_experience").record(start.elapsed().as_secs_f64());
+    counter!("simulations_total", "type" => "virtual_experience").increment(1);
+    Json(ApiResponse::ok(result))
 }

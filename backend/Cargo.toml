@@ -29,6 +29,7 @@ parking_lot = "0.12"
 metrics = "0.22"
 metrics-exporter-prometheus = "0.14"
 axum-extra = { version = "0.9", features = ["typed-header"] }
+rayon = "1.10"
 
 [profile.release]
 opt-level = 3

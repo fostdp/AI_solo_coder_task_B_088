@@ -5,6 +5,11 @@ mod alarm_mqtt;
 mod dtu_receiver;
 mod storage;
 mod routes;
+mod design_comparator;
+mod era_comparator;
+mod noise_simulator;
+mod vr_echo_wall;
+mod acoustic_pool;
 
 use crate::alarm_mqtt::AlarmTask;
 use crate::acoustic_simulator::SimulatorTask;
@@ -105,6 +110,9 @@ async fn main() -> anyhow::Result<()> {
     info!("ClickHouse: {} / {}", ch_url, ch_database);
     info!("MQTT Broker: {}:{}", mqtt_host, mqtt_port);
 
+    let compute_pool = Arc::new(acoustic_pool::AcousticComputePool::new(acoustic_config.clone()));
+    info!("声学计算线程池已启动，{} 个工作线程", compute_pool.num_threads());
+
     let store = Arc::new(ClickHouseStore::new(&ch_url, &ch_database, acoustic_config.clone()));
 
     let (alarm_tx, alarm_rx) = tokio::sync::mpsc::channel::<AlarmEvent>(256);
@@ -139,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
         sim_tx,
         analyzer_tx,
         config: acoustic_config.clone(),
+        compute_pool,
     });
 
     let cors = CorsLayer::new()
@@ -163,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
 
     let addr: SocketAddr = format!("{}:{}", listen_host, listen_port).parse()?;
     info!("HTTP服务监听: http://{}", addr);
-    info!("模块拓扑: dtu_receiver → alarm_mqtt, acoustic_simulator (RPC), clarity_analyzer (RPC) → alarm_mqtt");
+    info!("模块拓扑: dtu_receiver → alarm_mqtt, acoustic_pool (rayon threadpool), design_comparator, era_comparator, noise_simulator, vr_echo_wall → alarm_mqtt");
     info!("=====================================================");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
